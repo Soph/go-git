@@ -49,6 +49,10 @@ test-coverage:
 	echo "" > $(COVERAGE_REPORT); \
 	$(GOTEST) -coverprofile=$(COVERAGE_REPORT) -coverpkg=./... -covermode=$(COVERAGE_MODE) ./...
 
+test-interop:
+	@echo "running interop tests against `git version`"; \
+	$(GOTEST) -tags interop -race -v ./tests/interop/...
+
 clean:
 	rm -rf $(GIT_DIST_PATH)
 
