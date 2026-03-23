@@ -18,6 +18,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/cache"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-git/v6/plumbing/storer"
 	"github.com/go-git/go-git/v6/storage/filesystem"
 	"github.com/stretchr/testify/require"
 )
@@ -280,6 +281,38 @@ func newBareRepo(t *testing.T) *repo {
 	bare := &repo{t: t, dir: tempDir(t, "interop-bare-*")}
 	bare.git("init", "--bare", "-b", "main")
 	return bare
+}
+
+type reflogSnapshot struct {
+	OldHash string
+	NewHash string
+	Message string
+}
+
+func snapshotReflog(t *testing.T, repo *git.Repository, ref plumbing.ReferenceName) []reflogSnapshot {
+	t.Helper()
+	rs, ok := repo.Storer.(storer.ReflogStorer)
+	require.True(t, ok, "storage must implement ReflogStorer")
+
+	entries, err := rs.Reflog(ref)
+	require.NoError(t, err)
+
+	snaps := make([]reflogSnapshot, len(entries))
+	for i, e := range entries {
+		snaps[i] = reflogSnapshot{
+			OldHash: e.OldHash.String(),
+			NewHash: e.NewHash.String(),
+			Message: e.Message,
+		}
+	}
+	return snaps
+}
+
+func mustReflogStorer(t *testing.T, repo *git.Repository) storer.ReflogStorer {
+	t.Helper()
+	rs, ok := repo.Storer.(storer.ReflogStorer)
+	require.True(t, ok, "storage must implement ReflogStorer")
+	return rs
 }
 
 func mustCreateRemote(t *testing.T, repo *git.Repository, name string, urls ...string) {
