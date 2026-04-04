@@ -41,6 +41,16 @@ var (
 		// noop-v1 does not change git’s behavior at all.
 		// It is useful only for testing format-1 compatibility.
 		"noop-v1": {},
+
+		// objectformat specifies the hash algorithm used for object names.
+		// Also handled by storage’s ExtensionChecker, but listed here
+		// for robustness.
+		"objectformat": {},
+
+		// compatobjectformat specifies an alternate hash format used for
+		// backward-compatible SHA-256 migration. It is informational and
+		// does not change how go-git stores objects.
+		"compatobjectformat": {},
 	}
 
 	// Some Git extensions were supported upstream before the introduction

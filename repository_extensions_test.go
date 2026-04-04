@@ -64,6 +64,14 @@ func TestVerifyExtensions(t *testing.T) {
 				cfg.Raw.Section("extensions").SetOption("objectformat", "sha1")
 			},
 		},
+		{
+			name: "repositoryformatversion=1: allows compatobjectformat",
+			setup: func(t *testing.T, cfg *config.Config) {
+				cfg.Core.RepositoryFormatVersion = formatcfg.Version1
+				cfg.Raw.Section("extensions").SetOption("objectformat", "sha1")
+				cfg.Raw.Section("extensions").SetOption("compatobjectformat", "sha256")
+			},
+		},
 	}
 
 	for _, tt := range tests {
