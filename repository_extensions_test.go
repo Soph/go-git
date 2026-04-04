@@ -1,6 +1,9 @@
 package git
 
 import (
+	"bytes"
+	"log"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -9,6 +12,7 @@ import (
 	"github.com/go-git/go-git/v6/config"
 	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/storage/memory"
+	"github.com/go-git/go-git/v6/utils/trace"
 )
 
 func TestVerifyExtensions(t *testing.T) {
@@ -42,14 +46,6 @@ func TestVerifyExtensions(t *testing.T) {
 			},
 		},
 		{
-			name: "repositoryformatversion=1: rejects unknown extensions",
-			setup: func(_ *testing.T, cfg *config.Config) {
-				cfg.Core.RepositoryFormatVersion = formatcfg.Version1
-				cfg.Raw.Section("extensions").SetOption("unknownext", "true")
-			},
-			wantErr: "unknown extension: unknownext",
-		},
-		{
 			name: "repositoryformatversion=1: allows known extension",
 			setup: func(_ *testing.T, cfg *config.Config) {
 				cfg.Core.RepositoryFormatVersion = formatcfg.Version1
@@ -66,7 +62,7 @@ func TestVerifyExtensions(t *testing.T) {
 		},
 		{
 			name: "repositoryformatversion=1: allows compatobjectformat",
-			setup: func(t *testing.T, cfg *config.Config) {
+			setup: func(_ *testing.T, cfg *config.Config) {
 				cfg.Core.RepositoryFormatVersion = formatcfg.Version1
 				cfg.Raw.Section("extensions").SetOption("objectformat", "sha1")
 				cfg.Raw.Section("extensions").SetOption("compatobjectformat", "sha256")
@@ -101,4 +97,35 @@ func TestVerifyExtensions(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestVerifyExtensionsWarnsOnUnknown(t *testing.T) {
+	// Capture trace output to verify the warning is emitted.
+	var buf bytes.Buffer
+	prevTarget := trace.GetTarget()
+	trace.SetTarget(trace.General)
+	trace.SetLogger(log.New(&buf, "", 0))
+	t.Cleanup(func() {
+		trace.SetTarget(prevTarget)
+		trace.SetLogger(log.New(os.Stderr, "", log.Ltime|log.Lmicroseconds|log.Lshortfile))
+	})
+
+	st := memory.NewStorage()
+
+	r, err := Init(st)
+	require.NoError(t, err)
+	require.NotNil(t, r)
+
+	cfg, err := st.Config()
+	require.NoError(t, err)
+
+	cfg.Core.RepositoryFormatVersion = formatcfg.Version1
+	cfg.Raw.Section("extensions").SetOption("unknownext", "true")
+	require.NoError(t, st.SetConfig(cfg))
+
+	r, err = Open(st, nil)
+	require.NoError(t, err)
+	assert.NotNil(t, r)
+
+	assert.Contains(t, buf.String(), "unknown extension: unknownext")
 }

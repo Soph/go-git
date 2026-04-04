@@ -8,6 +8,7 @@ import (
 	"github.com/go-git/go-git/v6/config"
 	cfgformat "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/storage"
+	"github.com/go-git/go-git/v6/utils/trace"
 	xstorage "github.com/go-git/go-git/v6/x/storage"
 )
 
@@ -21,8 +22,9 @@ var (
 	// is using a format version that is not supported.
 	ErrUnsupportedRepositoryFormatVersion = errors.New("core.repositoryformatversion not supported")
 
-	// ErrUnknownExtension represents when a repository has an extension
-	// which is unknown or unsupported by go-git.
+	// ErrUnknownExtension is logged as a trace warning when a repository
+	// has an extension that is not recognized by go-git. Matching real
+	// git behavior, unknown extensions no longer cause Open to fail.
 	ErrUnknownExtension = errors.New("unknown extension")
 
 	// builtinExtensions defines the Git extensions that are supported by
@@ -132,7 +134,12 @@ func verifyExtensions(st storage.Storer, cfg *config.Config) error {
 		}
 
 		if len(missing) > 0 {
-			return fmt.Errorf("%w: %s", ErrUnknownExtension, strings.Join(missing, ", "))
+			// Real git ignores unknown extensions in format version 1
+			// repositories rather than refusing to open them. Log a
+			// trace warning so the information is available when
+			// GIT_TRACE is enabled, but do not return an error.
+			trace.General.Printf("warning: %s: %s",
+				ErrUnknownExtension, strings.Join(missing, ", "))
 		}
 	}
 
