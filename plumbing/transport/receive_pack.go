@@ -206,8 +206,8 @@ func receivePackObjects(st storage.Storer, rd io.Reader, updreq *packp.UpdateReq
 	}
 
 	for _, cmd := range updreq.Commands {
-		cmd.Old = normalizeReceivePackHash(tp.Translator(), cmd.Old)
-		cmd.New = normalizeReceivePackHash(tp.Translator(), cmd.New)
+		cmd.Old = normalizeObjectHash(tp.Translator(), cmd.Old)
+		cmd.New = normalizeObjectHash(tp.Translator(), cmd.New)
 	}
 
 	return nil
@@ -234,7 +234,7 @@ func storageObjectFormat(st storage.Storer) formatcfg.ObjectFormat {
 	return formatcfg.DefaultObjectFormat
 }
 
-func normalizeReceivePackHash(t *compat.Translator, h plumbing.Hash) plumbing.Hash {
+func normalizeObjectHash(t *compat.Translator, h plumbing.Hash) plumbing.Hash {
 	if h.IsZero() {
 		return h
 	}

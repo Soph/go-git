@@ -219,7 +219,7 @@ func TestTranslateCommitWithMergeTag(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, commitText, string(roundTrip))
 
-	translatedMergeTag, err := tr.translateTag([]byte(mergeTag))
+	translatedMergeTag, err := tr.rewriteTagContent([]byte(mergeTag), false)
 	require.NoError(t, err)
 	assert.Contains(t, string(translatedMergeTag), "object "+rootCompat.String())
 }

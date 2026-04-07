@@ -66,7 +66,7 @@ func (t *Translator) TranslateObject(obj plumbing.EncodedObject) (plumbing.Hash,
 		return plumbing.Hash{}, err
 	}
 
-	compatContent, err := t.nativeToCompatContent(obj.Type(), content)
+	compatContent, err := t.rewriteContentToCompat(obj.Type(), content)
 	if err != nil {
 		return plumbing.Hash{}, err
 	}
@@ -105,7 +105,7 @@ func (t *Translator) ImportObject(obj plumbing.EncodedObject, dst storer.Encoded
 		return plumbing.Hash{}, err
 	}
 
-	nativeContent, err := t.compatToNativeContent(obj.Type(), content)
+	nativeContent, err := t.rewriteContentToNative(obj.Type(), content)
 	if err != nil {
 		return plumbing.Hash{}, err
 	}
@@ -158,24 +158,24 @@ func storeObject(dst storer.EncodedObjectStorer, objType plumbing.ObjectType, co
 	return dst.SetEncodedObject(obj)
 }
 
-func (t *Translator) nativeToCompatContent(objType plumbing.ObjectType, content []byte) ([]byte, error) {
+func (t *Translator) rewriteContentToCompat(objType plumbing.ObjectType, content []byte) ([]byte, error) {
 	switch objType {
 	case plumbing.BlobObject:
 		return content, nil
 	case plumbing.TreeObject:
-		compatContent, err := t.translateTreeContent(content, false)
+		compatContent, err := t.rewriteTreeContent(content, false)
 		if err != nil {
 			return nil, fmt.Errorf("translate tree: %w", err)
 		}
 		return compatContent, nil
 	case plumbing.CommitObject:
-		compatContent, err := t.translateCommit(content)
+		compatContent, err := t.rewriteCommitContent(content, false)
 		if err != nil {
 			return nil, fmt.Errorf("translate commit: %w", err)
 		}
 		return compatContent, nil
 	case plumbing.TagObject:
-		compatContent, err := t.translateTag(content)
+		compatContent, err := t.rewriteTagContent(content, false)
 		if err != nil {
 			return nil, fmt.Errorf("translate tag: %w", err)
 		}
@@ -185,24 +185,24 @@ func (t *Translator) nativeToCompatContent(objType plumbing.ObjectType, content 
 	}
 }
 
-func (t *Translator) compatToNativeContent(objType plumbing.ObjectType, content []byte) ([]byte, error) {
+func (t *Translator) rewriteContentToNative(objType plumbing.ObjectType, content []byte) ([]byte, error) {
 	switch objType {
 	case plumbing.BlobObject:
 		return content, nil
 	case plumbing.TreeObject:
-		nativeContent, err := t.translateTreeContent(content, true)
+		nativeContent, err := t.rewriteTreeContent(content, true)
 		if err != nil {
 			return nil, fmt.Errorf("translate tree: %w", err)
 		}
 		return nativeContent, nil
 	case plumbing.CommitObject:
-		nativeContent, err := t.reverseTranslateCommit(content)
+		nativeContent, err := t.rewriteCommitContent(content, true)
 		if err != nil {
 			return nil, fmt.Errorf("translate commit: %w", err)
 		}
 		return nativeContent, nil
 	case plumbing.TagObject:
-		nativeContent, err := t.reverseTranslateTag(content)
+		nativeContent, err := t.rewriteTagContent(content, true)
 		if err != nil {
 			return nil, fmt.Errorf("translate tag: %w", err)
 		}
@@ -212,9 +212,9 @@ func (t *Translator) compatToNativeContent(objType plumbing.ObjectType, content 
 	}
 }
 
-// translateTreeContent rewrites binary hashes in tree entries between native
+// rewriteTreeContent rewrites binary hashes in tree entries between native
 // and compat formats. Tree entry format: <mode-octal> <name>\0<binary-hash>
-func (t *Translator) translateTreeContent(content []byte, reverse bool) ([]byte, error) {
+func (t *Translator) rewriteTreeContent(content []byte, reverse bool) ([]byte, error) {
 	fromSize := t.formats.Native.Size()
 	toSize := t.formats.Compat.Size()
 	lookup := t.mapping.NativeToCompat
@@ -258,31 +258,33 @@ func (t *Translator) translateTreeContent(content []byte, reverse bool) ([]byte,
 	return out.Bytes(), nil
 }
 
-// translateCommit rewrites hex hashes on "tree" and "parent" lines.
-func (t *Translator) translateCommit(content []byte) ([]byte, error) {
-	return t.translateCommitTextObject(content, false)
+// rewriteCommitContent rewrites commit header hashes between native and compat
+// formats, including tree, parent, and embedded mergetag references.
+func (t *Translator) rewriteCommitContent(content []byte, reverse bool) ([]byte, error) {
+	return t.rewriteCommitTextObject(content, reverse)
 }
 
-// translateTag rewrites the hex hash on the "object" line.
-func (t *Translator) translateTag(content []byte) ([]byte, error) {
-	return t.translateTextObject(content, []string{"object"}, false)
+// rewriteTagContent rewrites the object hash in an annotated tag between
+// native and compat formats.
+func (t *Translator) rewriteTagContent(content []byte, reverse bool) ([]byte, error) {
+	return t.rewriteTextObject(content, []string{"object"}, reverse)
 }
 
 // reverseTranslateCommit rewrites compat-format hex hashes on "tree" and
 // "parent" lines back to native-format hashes.
 func (t *Translator) reverseTranslateCommit(content []byte) ([]byte, error) {
-	return t.translateCommitTextObject(content, true)
+	return t.rewriteCommitContent(content, true)
 }
 
 // reverseTranslateTag rewrites the compat-format hex hash on the "object" line
 // back to the native object hash.
 func (t *Translator) reverseTranslateTag(content []byte) ([]byte, error) {
-	return t.translateTextObject(content, []string{"object"}, true)
+	return t.rewriteTagContent(content, true)
 }
 
-// translateTextObject rewrites hex hashes on specified header lines between
+// rewriteTextObject rewrites hex hashes on specified header lines between
 // native and compat formats. It processes lines until it hits an empty line.
-func (t *Translator) translateTextObject(content []byte, hashFields []string, reverse bool) ([]byte, error) {
+func (t *Translator) rewriteTextObject(content []byte, hashFields []string, reverse bool) ([]byte, error) {
 	fromHexSize := t.formats.Native.HexSize()
 	toHexSize := t.formats.Compat.HexSize()
 	lookup := t.mapping.NativeToCompat
@@ -356,7 +358,7 @@ func (t *Translator) translateTextObject(content []byte, hashFields []string, re
 	return out.Bytes(), nil
 }
 
-func (t *Translator) translateCommitTextObject(content []byte, reverse bool) ([]byte, error) {
+func (t *Translator) rewriteCommitTextObject(content []byte, reverse bool) ([]byte, error) {
 	var out bytes.Buffer
 	remaining := content
 	headerDone := false
@@ -401,9 +403,9 @@ func (t *Translator) translateCommitTextObject(content []byte, reverse bool) ([]
 			var translated []byte
 			var err error
 			if reverse {
-				translated, err = t.translateTextObject(append(line, '\n'), fields, true)
+				translated, err = t.rewriteTextObject(append(line, '\n'), fields, true)
 			} else {
-				translated, err = t.translateTextObject(append(line, '\n'), fields, false)
+				translated, err = t.rewriteTextObject(append(line, '\n'), fields, false)
 			}
 			if err != nil {
 				return nil, err
@@ -464,9 +466,9 @@ func (t *Translator) translateMergeTagSection(out *bytes.Buffer, firstLine, rema
 	var translated []byte
 	var err error
 	if reverse {
-		translated, err = t.reverseTranslateTag(payload)
+		translated, err = t.rewriteTagContent(payload, true)
 	} else {
-		translated, err = t.translateTag(payload)
+		translated, err = t.rewriteTagContent(payload, false)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("translate mergetag: %w", err)
@@ -498,11 +500,11 @@ func (t *Translator) ReverseTranslateContent(objType plumbing.ObjectType, native
 	case plumbing.BlobObject:
 		return nativeContent, nil
 	case plumbing.TreeObject:
-		return t.translateTreeContent(nativeContent, false)
+		return t.rewriteTreeContent(nativeContent, false)
 	case plumbing.CommitObject:
-		return t.translateCommit(nativeContent)
+		return t.rewriteCommitContent(nativeContent, false)
 	case plumbing.TagObject:
-		return t.translateTag(nativeContent)
+		return t.rewriteTagContent(nativeContent, false)
 	default:
 		return nil, fmt.Errorf("unsupported object type: %s", objType)
 	}

@@ -33,14 +33,14 @@ func (s *ReceivePackSuite) TestReceivePackAdvertiseV1() {
 	s.Containsf(buf.String(), "version 1", "advertisement should contain version 1")
 }
 
-func (s *ReceivePackSuite) TestNormalizeReceivePackHashZeroSHA256() {
+func (s *ReceivePackSuite) TestNormalizeObjectHashZeroSHA256() {
 	zero := plumbing.NewHash(strings.Repeat("0", formatcfg.SHA256.HexSize()))
 	tr := compat.NewTranslator(compat.Formats{
 		Native: formatcfg.SHA1,
 		Compat: formatcfg.SHA256,
 	}, compat.NewMemoryMapping())
 
-	h := normalizeReceivePackHash(tr, zero)
+	h := normalizeObjectHash(tr, zero)
 	s.True(h.IsZero())
 	s.Equal(zero.String(), h.String())
 }
