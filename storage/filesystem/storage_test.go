@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/cache"
 	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/storer"
@@ -341,6 +342,48 @@ func TestSupportsExtension(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestSetEncodedObjectPersistsCompatMapping(t *testing.T) {
+	t.Parallel()
+
+	fs := memfs.New()
+	sto := filesystem.NewStorage(fs, cache.NewObjectLRUDefault())
+	require.NoError(t, sto.Init())
+
+	cfg, err := sto.Config()
+	require.NoError(t, err)
+	cfg.Core.RepositoryFormatVersion = formatcfg.Version1
+	cfg.Extensions.ObjectFormat = formatcfg.SHA256
+	cfg.Extensions.CompatObjectFormat = formatcfg.SHA1
+	require.NoError(t, sto.SetConfig(cfg))
+
+	sto = filesystem.NewStorage(fs, cache.NewObjectLRUDefault())
+	tp, ok := any(sto).(xstorage.CompatTranslatorProvider)
+	require.True(t, ok)
+	require.NotNil(t, tp.Translator())
+
+	obj := sto.NewEncodedObject()
+	obj.SetType(plumbing.BlobObject)
+	content := []byte("hello compat\n")
+	obj.SetSize(int64(len(content)))
+	w, err := obj.Writer()
+	require.NoError(t, err)
+	_, err = w.Write(content)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	nativeHash, err := sto.SetEncodedObject(obj)
+	require.NoError(t, err)
+
+	compatHash, err := tp.Translator().Mapping().NativeToCompat(nativeHash)
+	require.NoError(t, err)
+	assert.False(t, compatHash.IsZero())
+
+	reopened := filesystem.NewStorage(fs, cache.NewObjectLRUDefault())
+	compatObj, err := reopened.EncodedObject(plumbing.BlobObject, compatHash)
+	require.NoError(t, err)
+	assert.Equal(t, nativeHash, compatObj.Hash())
 }
 
 func getExplicitSHA1(t testing.TB) billy.Filesystem {

@@ -254,6 +254,26 @@ func (s *Storage) EncodedObject(t plumbing.ObjectType, h plumbing.Hash) (plumbin
 	return s.ObjectStorage.EncodedObject(t, native)
 }
 
+// SetEncodedObject stores the object and, if compat is enabled,
+// computes and records its compat hash mapping.
+func (s *Storage) SetEncodedObject(obj plumbing.EncodedObject) (plumbing.Hash, error) {
+	h, err := s.ObjectStorage.SetEncodedObject(obj)
+	if err != nil {
+		return h, err
+	}
+
+	if s.translator != nil {
+		if _, terr := s.translator.TranslateObject(obj); terr != nil {
+			// Translation failure is non-fatal for now; the object is still
+			// stored. This can happen when dependencies haven't been
+			// translated yet (out-of-order insertion).
+			_ = terr
+		}
+	}
+
+	return h, nil
+}
+
 // Filesystem returns the underlying filesystem
 func (s *Storage) Filesystem() billy.Filesystem {
 	return s.fs
