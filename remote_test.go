@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/go-git/go-git/v6/config"
+	"github.com/go-git/go-git/v6/internal/compatutil"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/cache"
 	"github.com/go-git/go-git/v6/plumbing/compat"
@@ -682,7 +683,7 @@ func (s *RemoteSuite) TestCompatHashForPushZeroSHA256() {
 		Compat: formatcfg.SHA1,
 	}, compat.NewMemoryMapping())
 
-	h, err := compatHashForPush(zero, tr)
+	h, err := compatutil.HashForPush(zero, tr)
 	s.NoError(err)
 	s.True(h.IsZero())
 	s.Equal(zero.String(), h.String())

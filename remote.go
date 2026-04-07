@@ -11,12 +11,12 @@ import (
 	"github.com/go-git/go-billy/v6/osfs"
 
 	"github.com/go-git/go-git/v6/config"
+	"github.com/go-git/go-git/v6/internal/compatutil"
 	"github.com/go-git/go-git/v6/internal/reference"
 	"github.com/go-git/go-git/v6/internal/repository"
 	"github.com/go-git/go-git/v6/internal/url"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/cache"
-	"github.com/go-git/go-git/v6/plumbing/compat"
 	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/format/packfile"
 	"github.com/go-git/go-git/v6/plumbing/object"
@@ -1482,18 +1482,15 @@ func preparePushRequest(
 		}
 
 		requestFormat = serverFormat
-		translatedCmds, err := translatePushCommands(cmds, tp.Translator())
+		translatedCmds, err := compatutil.TranslatePushCommands(cmds, tp.Translator())
 		if err != nil {
 			return "", nil, nil, nil, err
 		}
-		translatedHashes, err := translatePushHashes(hs, tp.Translator())
+		translatedHashes, err := compatutil.TranslatePushHashes(hs, tp.Translator())
 		if err != nil {
 			return "", nil, nil, nil, err
 		}
-		return requestFormat, translatedCmds, translatedHashes, &compatPushStorer{
-			Storer:     s,
-			translator: tp.Translator(),
-		}, nil
+		return requestFormat, translatedCmds, translatedHashes, compatutil.NewPushStorer(s, tp.Translator()), nil
 	}
 
 	return requestFormat, cmds, hs, s, nil
@@ -1536,119 +1533,6 @@ func pushLocalRemoteObjectFormat(remoteURL string) formatcfg.ObjectFormat {
 	}
 
 	return formatcfg.DefaultObjectFormat
-}
-
-func translatePushCommands(cmds []*packp.Command, t *compat.Translator) ([]*packp.Command, error) {
-	translated := make([]*packp.Command, 0, len(cmds))
-	for _, cmd := range cmds {
-		oldHash, err := compatHashForPush(cmd.Old, t)
-		if err != nil {
-			return nil, err
-		}
-		newHash, err := compatHashForPush(cmd.New, t)
-		if err != nil {
-			return nil, err
-		}
-		translated = append(translated, &packp.Command{
-			Name: cmd.Name,
-			Old:  oldHash,
-			New:  newHash,
-		})
-	}
-	return translated, nil
-}
-
-func translatePushHashes(hs []plumbing.Hash, t *compat.Translator) ([]plumbing.Hash, error) {
-	translated := make([]plumbing.Hash, 0, len(hs))
-	for _, h := range hs {
-		compatHash, err := compatHashForPush(h, t)
-		if err != nil {
-			return nil, err
-		}
-		translated = append(translated, compatHash)
-	}
-	return translated, nil
-}
-
-func compatHashForPush(h plumbing.Hash, t *compat.Translator) (plumbing.Hash, error) {
-	if h.IsZero() {
-		return h, nil
-	}
-	compatHash, err := t.Mapping().NativeToCompat(h)
-	if err != nil {
-		return plumbing.Hash{}, fmt.Errorf("resolve compat hash for %s: %w", h, err)
-	}
-	return compatHash, nil
-}
-
-type compatPushStorer struct {
-	storage.Storer
-	translator *compat.Translator
-}
-
-func (s *compatPushStorer) Config() (*config.Config, error) {
-	cfg, err := s.Storer.Config()
-	if err != nil {
-		return nil, err
-	}
-
-	cloned := *cfg
-	cloned.Extensions = cfg.Extensions
-	cloned.Extensions.ObjectFormat = s.translator.CompatObjectFormat()
-	return &cloned, nil
-}
-
-func (s *compatPushStorer) NewEncodedObject() plumbing.EncodedObject {
-	return plumbing.NewMemoryObject(plumbing.FromObjectFormat(s.translator.CompatObjectFormat()))
-}
-
-func (s *compatPushStorer) EncodedObject(ot plumbing.ObjectType, h plumbing.Hash) (plumbing.EncodedObject, error) {
-	nativeHash, err := s.translator.Mapping().CompatToNative(h)
-	if err != nil {
-		return nil, plumbing.ErrObjectNotFound
-	}
-
-	obj, err := s.Storer.EncodedObject(ot, nativeHash)
-	if err != nil {
-		return nil, err
-	}
-
-	compatContent, err := compatPushObjectContent(obj, s.translator)
-	if err != nil {
-		return nil, err
-	}
-
-	translated := plumbing.NewMemoryObject(plumbing.FromObjectFormat(s.translator.CompatObjectFormat()))
-	translated.SetType(obj.Type())
-	translated.SetSize(int64(len(compatContent)))
-	w, err := translated.Writer()
-	if err != nil {
-		return nil, err
-	}
-	if _, err := w.Write(compatContent); err != nil {
-		_ = w.Close()
-		return nil, err
-	}
-	if err := w.Close(); err != nil {
-		return nil, err
-	}
-
-	return translated, nil
-}
-
-func compatPushObjectContent(obj plumbing.EncodedObject, t *compat.Translator) ([]byte, error) {
-	reader, err := obj.Reader()
-	if err != nil {
-		return nil, err
-	}
-	defer reader.Close()
-
-	content, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, err
-	}
-
-	return t.ReverseTranslateContent(obj.Type(), content)
 }
 
 func (r *Remote) checkRequireRemoteRefs(requires []config.RefSpec, remoteRefs storer.ReferenceStorer) error {

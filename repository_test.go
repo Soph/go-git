@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/go-git/go-git/v6/config"
+	"github.com/go-git/go-git/v6/internal/compatutil"
 	"github.com/go-git/go-git/v6/internal/server"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/cache"
@@ -939,7 +940,7 @@ func TestCompatPushStorerTranslatesTreeContent(t *testing.T) {
 		compatTreeHash, err := tr.Mapping().NativeToCompat(commit.TreeHash)
 		require.NoError(t, err)
 
-		pushStorer := &compatPushStorer{Storer: r.Storer, translator: tr}
+		pushStorer := compatutil.NewPushStorer(r.Storer, tr)
 		obj, err := pushStorer.EncodedObject(plumbing.TreeObject, compatTreeHash)
 		require.NoError(t, err)
 
@@ -965,7 +966,7 @@ func TestCompatPushStorerConfigUsesCompatFormat(t *testing.T) {
 	tr := st.Translator()
 	require.NotNil(t, tr)
 
-	pushStorer := &compatPushStorer{Storer: st, translator: tr}
+	pushStorer := compatutil.NewPushStorer(st, tr)
 	cfg, err := pushStorer.Config()
 	require.NoError(t, err)
 	assert.Equal(t, formatcfg.SHA256, cfg.Extensions.ObjectFormat)
@@ -985,7 +986,7 @@ func TestCompatPushStorerMissingMappingReturnsObjectNotFound(t *testing.T) {
 	tr := st.Translator()
 	require.NotNil(t, tr)
 
-	pushStorer := &compatPushStorer{Storer: st, translator: tr}
+	pushStorer := compatutil.NewPushStorer(st, tr)
 	_, err := pushStorer.EncodedObject(plumbing.CommitObject, plumbing.NewHash(strings.Repeat("a", formatcfg.SHA256.HexSize())))
 	assert.ErrorIs(t, err, plumbing.ErrObjectNotFound)
 }
@@ -1039,7 +1040,7 @@ func TestCompatPushStorerTranslatesCommitContent(t *testing.T) {
 	compatTreeHash, err := tr.Mapping().NativeToCompat(treeHash)
 	require.NoError(t, err)
 
-	pushStorer := &compatPushStorer{Storer: st, translator: tr}
+	pushStorer := compatutil.NewPushStorer(st, tr)
 	obj, err := pushStorer.EncodedObject(plumbing.CommitObject, compatCommitHash)
 	require.NoError(t, err)
 
