@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-git/go-git/v6/plumbing"
 	format "github.com/go-git/go-git/v6/plumbing/format/config"
+	"github.com/go-git/go-git/v6/plumbing/storer"
 )
 
 // Translator converts objects between native and compat hash formats,
@@ -44,44 +45,14 @@ func (t *Translator) Mapping() HashMapping {
 //
 // For blobs, content is identical across formats; only the hash differs.
 func (t *Translator) TranslateObject(obj plumbing.EncodedObject) (plumbing.Hash, error) {
-	reader, err := obj.Reader()
+	content, err := readObjectContent(obj)
 	if err != nil {
-		return plumbing.Hash{}, fmt.Errorf("read object: %w", err)
-	}
-	defer reader.Close()
-
-	content, err := io.ReadAll(reader)
-	if err != nil {
-		return plumbing.Hash{}, fmt.Errorf("read object content: %w", err)
+		return plumbing.Hash{}, err
 	}
 
-	var compatContent []byte
-
-	switch obj.Type() {
-	case plumbing.BlobObject:
-		// Blob content is identical in both formats.
-		compatContent = content
-
-	case plumbing.TreeObject:
-		compatContent, err = t.translateTree(content)
-		if err != nil {
-			return plumbing.Hash{}, fmt.Errorf("translate tree: %w", err)
-		}
-
-	case plumbing.CommitObject:
-		compatContent, err = t.translateCommit(content)
-		if err != nil {
-			return plumbing.Hash{}, fmt.Errorf("translate commit: %w", err)
-		}
-
-	case plumbing.TagObject:
-		compatContent, err = t.translateTag(content)
-		if err != nil {
-			return plumbing.Hash{}, fmt.Errorf("translate tag: %w", err)
-		}
-
-	default:
-		return plumbing.Hash{}, fmt.Errorf("unsupported object type: %s", obj.Type())
+	compatContent, err := t.nativeToCompatContent(obj.Type(), content)
+	if err != nil {
+		return plumbing.Hash{}, err
 	}
 
 	compatHash, err := t.compatHasher.Compute(obj.Type(), compatContent)
@@ -94,6 +65,121 @@ func (t *Translator) TranslateObject(obj plumbing.EncodedObject) (plumbing.Hash,
 	}
 
 	return compatHash, nil
+}
+
+// ImportObject stores an object written in compat format into dst using the
+// native object format, then records the native<->compat mapping.
+func (t *Translator) ImportObject(obj plumbing.EncodedObject, dst storer.EncodedObjectStorer) (plumbing.Hash, error) {
+	content, err := readObjectContent(obj)
+	if err != nil {
+		return plumbing.Hash{}, err
+	}
+
+	nativeContent, err := t.compatToNativeContent(obj.Type(), content)
+	if err != nil {
+		return plumbing.Hash{}, err
+	}
+
+	nativeHash, err := storeObject(dst, obj.Type(), nativeContent)
+	if err != nil {
+		return plumbing.Hash{}, fmt.Errorf("store native object: %w", err)
+	}
+
+	if err := t.mapping.Add(nativeHash, obj.Hash()); err != nil {
+		return plumbing.Hash{}, fmt.Errorf("record mapping: %w", err)
+	}
+
+	return nativeHash, nil
+}
+
+func readObjectContent(obj plumbing.EncodedObject) ([]byte, error) {
+	reader, err := obj.Reader()
+	if err != nil {
+		return nil, fmt.Errorf("read object: %w", err)
+	}
+	defer reader.Close()
+
+	content, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("read object content: %w", err)
+	}
+
+	return content, nil
+}
+
+func storeObject(dst storer.EncodedObjectStorer, objType plumbing.ObjectType, content []byte) (plumbing.Hash, error) {
+	obj := dst.NewEncodedObject()
+	obj.SetType(objType)
+	obj.SetSize(int64(len(content)))
+
+	w, err := obj.Writer()
+	if err != nil {
+		return plumbing.Hash{}, fmt.Errorf("open object writer: %w", err)
+	}
+
+	if _, err := w.Write(content); err != nil {
+		_ = w.Close()
+		return plumbing.Hash{}, fmt.Errorf("write object content: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		return plumbing.Hash{}, fmt.Errorf("close object writer: %w", err)
+	}
+
+	return dst.SetEncodedObject(obj)
+}
+
+func (t *Translator) nativeToCompatContent(objType plumbing.ObjectType, content []byte) ([]byte, error) {
+	switch objType {
+	case plumbing.BlobObject:
+		return content, nil
+	case plumbing.TreeObject:
+		compatContent, err := t.translateTree(content)
+		if err != nil {
+			return nil, fmt.Errorf("translate tree: %w", err)
+		}
+		return compatContent, nil
+	case plumbing.CommitObject:
+		compatContent, err := t.translateCommit(content)
+		if err != nil {
+			return nil, fmt.Errorf("translate commit: %w", err)
+		}
+		return compatContent, nil
+	case plumbing.TagObject:
+		compatContent, err := t.translateTag(content)
+		if err != nil {
+			return nil, fmt.Errorf("translate tag: %w", err)
+		}
+		return compatContent, nil
+	default:
+		return nil, fmt.Errorf("unsupported object type: %s", objType)
+	}
+}
+
+func (t *Translator) compatToNativeContent(objType plumbing.ObjectType, content []byte) ([]byte, error) {
+	switch objType {
+	case plumbing.BlobObject:
+		return content, nil
+	case plumbing.TreeObject:
+		nativeContent, err := t.reverseTranslateTree(content)
+		if err != nil {
+			return nil, fmt.Errorf("translate tree: %w", err)
+		}
+		return nativeContent, nil
+	case plumbing.CommitObject:
+		nativeContent, err := t.reverseTranslateCommit(content)
+		if err != nil {
+			return nil, fmt.Errorf("translate commit: %w", err)
+		}
+		return nativeContent, nil
+	case plumbing.TagObject:
+		nativeContent, err := t.reverseTranslateTag(content)
+		if err != nil {
+			return nil, fmt.Errorf("translate tag: %w", err)
+		}
+		return nativeContent, nil
+	default:
+		return nil, fmt.Errorf("unsupported object type: %s", objType)
+	}
 }
 
 // translateTree rewrites binary hashes in tree entries from native to compat format.
@@ -145,6 +231,18 @@ func (t *Translator) translateCommit(content []byte) ([]byte, error) {
 // translateTag rewrites the hex hash on the "object" line.
 func (t *Translator) translateTag(content []byte) ([]byte, error) {
 	return t.translateTextObject(content, []string{"object"})
+}
+
+// reverseTranslateCommit rewrites compat-format hex hashes on "tree" and
+// "parent" lines back to native-format hashes.
+func (t *Translator) reverseTranslateCommit(content []byte) ([]byte, error) {
+	return t.reverseTranslateTextObject(content, []string{"tree", "parent"})
+}
+
+// reverseTranslateTag rewrites the compat-format hex hash on the "object" line
+// back to the native object hash.
+func (t *Translator) reverseTranslateTag(content []byte) ([]byte, error) {
+	return t.reverseTranslateTextObject(content, []string{"object"})
 }
 
 // translateTextObject rewrites hex hashes on specified header lines.
@@ -204,6 +302,107 @@ func (t *Translator) translateTextObject(content []byte, hashFields []string) ([
 			}
 		} else {
 			// Body: copy verbatim.
+			out.Write(line)
+			if nlIdx >= 0 {
+				out.WriteByte('\n')
+			}
+		}
+	}
+
+	return out.Bytes(), nil
+}
+
+// reverseTranslateTree rewrites binary hashes in tree entries from compat to
+// native format.
+func (t *Translator) reverseTranslateTree(content []byte) ([]byte, error) {
+	nativeSize := t.formats.Native.Size()
+	compatSize := t.formats.Compat.Size()
+
+	var out bytes.Buffer
+	buf := content
+
+	for len(buf) > 0 {
+		nullIdx := bytes.IndexByte(buf, 0)
+		if nullIdx < 0 {
+			return nil, fmt.Errorf("malformed tree entry: missing null byte")
+		}
+
+		out.Write(buf[:nullIdx+1])
+		buf = buf[nullIdx+1:]
+
+		if len(buf) < compatSize {
+			return nil, fmt.Errorf("malformed tree entry: truncated hash (have %d, want %d)", len(buf), compatSize)
+		}
+
+		compatHash, _ := plumbing.FromBytes(buf[:compatSize])
+		buf = buf[compatSize:]
+
+		nativeHash, err := t.mapping.CompatToNative(compatHash)
+		if err != nil {
+			return nil, fmt.Errorf("tree entry hash %s: no native mapping: %w", compatHash, err)
+		}
+
+		out.Write(nativeHash.Bytes()[:nativeSize])
+	}
+
+	return out.Bytes(), nil
+}
+
+// reverseTranslateTextObject rewrites compat-format hex hashes on the
+// specified header lines back to native-format hashes.
+func (t *Translator) reverseTranslateTextObject(content []byte, hashFields []string) ([]byte, error) {
+	compatHexSize := t.formats.Compat.HexSize()
+
+	var out bytes.Buffer
+	remaining := content
+	headerDone := false
+
+	for len(remaining) > 0 {
+		nlIdx := bytes.IndexByte(remaining, '\n')
+		var line []byte
+		if nlIdx >= 0 {
+			line = remaining[:nlIdx]
+			remaining = remaining[nlIdx+1:]
+		} else {
+			line = remaining
+			remaining = nil
+		}
+
+		if !headerDone {
+			if len(line) == 0 {
+				headerDone = true
+				out.WriteByte('\n')
+				continue
+			}
+
+			replaced := false
+			for _, field := range hashFields {
+				prefix := field + " "
+				if bytes.HasPrefix(line, []byte(prefix)) && len(line) == len(prefix)+compatHexSize {
+					hexStr := string(line[len(prefix):])
+					compatHash, ok := plumbing.FromHex(hexStr)
+					if !ok {
+						return nil, fmt.Errorf("invalid hash on %s line: %q", field, hexStr)
+					}
+
+					nativeHash, err := t.mapping.CompatToNative(compatHash)
+					if err != nil {
+						return nil, fmt.Errorf("%s hash %s: no native mapping: %w", field, compatHash, err)
+					}
+
+					out.WriteString(prefix)
+					out.WriteString(nativeHash.String()[:t.formats.Native.HexSize()])
+					out.WriteByte('\n')
+					replaced = true
+					break
+				}
+			}
+
+			if !replaced {
+				out.Write(line)
+				out.WriteByte('\n')
+			}
+		} else {
 			out.Write(line)
 			if nlIdx >= 0 {
 				out.WriteByte('\n')

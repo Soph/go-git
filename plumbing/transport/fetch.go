@@ -5,11 +5,13 @@ import (
 	"io"
 
 	"github.com/go-git/go-git/v6/plumbing/compat"
+	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/format/packfile"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp/capability"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp/sideband"
 	"github.com/go-git/go-git/v6/storage"
+	"github.com/go-git/go-git/v6/storage/memory"
 	"github.com/go-git/go-git/v6/utils/ioutil"
 	xstorage "github.com/go-git/go-git/v6/x/storage"
 )
@@ -41,18 +43,30 @@ func FetchPack(
 		reader = demuxer
 	}
 
-	if err := packfile.UpdateObjectStorage(st, reader); err != nil {
-		return err
-	}
-
-	// If the storage supports compatObjectFormat, translate all fetched
-	// objects to populate the bidirectional hash mapping table.
 	if tp, ok := st.(xstorage.CompatTranslatorProvider); ok {
 		if t := tp.Translator(); t != nil {
-			if err := compat.TranslateStoredObjects(st, t); err != nil {
-				return err
+			remoteFormat := remoteObjectFormat(conn)
+			if remoteFormat == t.CompatObjectFormat() && remoteFormat != t.NativeObjectFormat() {
+				tmp := memory.NewStorage(memory.WithObjectFormat(remoteFormat))
+				if err := packfile.UpdateObjectStorage(tmp, reader); err != nil {
+					return err
+				}
+				if err := compat.ImportStoredObjects(tmp, st, t); err != nil {
+					return err
+				}
+			} else {
+				if err := packfile.UpdateObjectStorage(st, reader); err != nil {
+					return err
+				}
+				if err := compat.TranslateStoredObjects(st, t); err != nil {
+					return err
+				}
 			}
+		} else if err := packfile.UpdateObjectStorage(st, reader); err != nil {
+			return err
 		}
+	} else if err := packfile.UpdateObjectStorage(st, reader); err != nil {
+		return err
 	}
 
 	if err := packf.Close(); err != nil {
@@ -67,6 +81,21 @@ func FetchPack(
 	}
 
 	return nil
+}
+
+func remoteObjectFormat(conn Connection) formatcfg.ObjectFormat {
+	caps := conn.Capabilities()
+	if caps.Supports(capability.ObjectFormat) {
+		if capValues := caps.Get(capability.ObjectFormat); len(capValues) > 0 {
+			of := formatcfg.ObjectFormat(capValues[0])
+			switch of {
+			case formatcfg.SHA1, formatcfg.SHA256:
+				return of
+			}
+		}
+	}
+
+	return formatcfg.DefaultObjectFormat
 }
 
 func updateShallow(st storage.Storer, shallowInfo *packp.ShallowUpdate) error {

@@ -1,6 +1,7 @@
 package compat_test
 
 import (
+	"io"
 	"testing"
 
 	"github.com/go-git/go-git/v6/plumbing"
@@ -98,4 +99,77 @@ func TestTranslateStoredObjectsEmpty(t *testing.T) {
 	err := compat.TranslateStoredObjects(s, tr)
 	require.NoError(t, err)
 	assert.Equal(t, 0, m.Count())
+}
+
+func TestImportStoredObjects(t *testing.T) {
+	src := memory.NewStorage(memory.WithObjectFormat(format.SHA1))
+	dst := memory.NewStorage(
+		memory.WithObjectFormat(format.SHA256),
+		memory.WithCompatObjectFormat(format.SHA1),
+	)
+
+	oh := plumbing.FromObjectFormat(format.SHA1)
+
+	blobContent := []byte("hello world\n")
+	blob := plumbing.NewMemoryObject(oh)
+	blob.SetType(plumbing.BlobObject)
+	blob.Write(blobContent)
+	blob.SetSize(int64(len(blobContent)))
+	blobHash, err := src.SetEncodedObject(blob)
+	require.NoError(t, err)
+
+	var treeContent []byte
+	treeContent = append(treeContent, []byte("100644 hello.txt")...)
+	treeContent = append(treeContent, 0x00)
+	treeContent = append(treeContent, blobHash.Bytes()...)
+	tree := plumbing.NewMemoryObject(oh)
+	tree.SetType(plumbing.TreeObject)
+	tree.Write(treeContent)
+	tree.SetSize(int64(len(treeContent)))
+	treeHash, err := src.SetEncodedObject(tree)
+	require.NoError(t, err)
+
+	commitText := "tree " + treeHash.String() + "\n" +
+		"author Test <t@t.com> 100 +0000\n" +
+		"committer Test <t@t.com> 100 +0000\n" +
+		"\n" +
+		"test commit\n"
+	commit := plumbing.NewMemoryObject(oh)
+	commit.SetType(plumbing.CommitObject)
+	commit.Write([]byte(commitText))
+	commit.SetSize(int64(len(commitText)))
+	commitHash, err := src.SetEncodedObject(commit)
+	require.NoError(t, err)
+
+	tr := dst.Translator()
+	require.NotNil(t, tr)
+
+	err = compat.ImportStoredObjects(src, dst, tr)
+	require.NoError(t, err)
+
+	for _, compatHash := range []plumbing.Hash{blobHash, treeHash, commitHash} {
+		nativeHash, err := tr.Mapping().CompatToNative(compatHash)
+		require.NoError(t, err)
+		assert.False(t, nativeHash.IsZero())
+
+		_, err = dst.EncodedObject(plumbing.AnyObject, compatHash)
+		require.NoError(t, err)
+	}
+
+	nativeCommitHash, err := tr.Mapping().CompatToNative(commitHash)
+	require.NoError(t, err)
+	commitObj, err := dst.ObjectStorage.EncodedObject(plumbing.CommitObject, nativeCommitHash)
+	require.NoError(t, err)
+
+	r, err := commitObj.Reader()
+	require.NoError(t, err)
+	defer r.Close()
+
+	content, err := io.ReadAll(r)
+	require.NoError(t, err)
+
+	nativeTreeHash, err := tr.Mapping().CompatToNative(treeHash)
+	require.NoError(t, err)
+	assert.Contains(t, string(content), "tree "+nativeTreeHash.String())
+	assert.NotContains(t, string(content), "tree "+treeHash.String())
 }

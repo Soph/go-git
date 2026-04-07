@@ -40,6 +40,30 @@ func TranslateStoredObjects(s storer.EncodedObjectStorer, t *Translator) error {
 	return nil
 }
 
+// ImportStoredObjects iterates over objects stored in compat format in src,
+// rewrites them into the translator's native format, stores them in dst, and
+// records the bidirectional mappings. Objects are processed in topological
+// order so internal references can be rewritten safely.
+func ImportStoredObjects(src, dst storer.EncodedObjectStorer, t *Translator) error {
+	if err := importObjectsOfType(src, dst, t, plumbing.BlobObject); err != nil {
+		return fmt.Errorf("import blobs: %w", err)
+	}
+
+	if err := importObjectsWithRetry(src, dst, t, plumbing.TreeObject); err != nil {
+		return fmt.Errorf("import trees: %w", err)
+	}
+
+	if err := importObjectsWithRetry(src, dst, t, plumbing.CommitObject); err != nil {
+		return fmt.Errorf("import commits: %w", err)
+	}
+
+	if err := importObjectsOfType(src, dst, t, plumbing.TagObject); err != nil {
+		return fmt.Errorf("import tags: %w", err)
+	}
+
+	return nil
+}
+
 // translateObjectsOfType translates all objects of the given type that
 // don't already have a compat mapping.
 func translateObjectsOfType(s storer.EncodedObjectStorer, t *Translator, objType plumbing.ObjectType) error {
@@ -111,5 +135,66 @@ func translateObjectsWithRetry(s storer.EncodedObjectStorer, t *Translator, objT
 		}
 
 		// Otherwise, retry to catch objects whose deps were just translated.
+	}
+}
+
+func importObjectsOfType(src, dst storer.EncodedObjectStorer, t *Translator, objType plumbing.ObjectType) error {
+	iter, err := src.IterEncodedObjects(objType)
+	if err != nil {
+		return err
+	}
+	defer iter.Close()
+
+	return iter.ForEach(func(obj plumbing.EncodedObject) error {
+		if _, err := t.mapping.CompatToNative(obj.Hash()); err == nil {
+			return nil
+		}
+
+		_, err := t.ImportObject(obj, dst)
+		return err
+	})
+}
+
+func importObjectsWithRetry(src, dst storer.EncodedObjectStorer, t *Translator, objType plumbing.ObjectType) error {
+	for {
+		imported := 0
+		skipped := 0
+
+		iter, err := src.IterEncodedObjects(objType)
+		if err != nil {
+			return err
+		}
+
+		err = iter.ForEach(func(obj plumbing.EncodedObject) error {
+			if _, err := t.mapping.CompatToNative(obj.Hash()); err == nil {
+				return nil
+			}
+
+			_, err := t.ImportObject(obj, dst)
+			if err != nil {
+				skipped++
+				return nil
+			}
+
+			imported++
+			return nil
+		})
+		iter.Close()
+
+		if err != nil {
+			return err
+		}
+
+		if imported == 0 && skipped == 0 {
+			return nil
+		}
+
+		if imported == 0 && skipped > 0 {
+			return fmt.Errorf("unable to import %d %s objects: missing dependencies", skipped, objType)
+		}
+
+		if skipped == 0 {
+			return nil
+		}
 	}
 }

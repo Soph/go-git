@@ -103,11 +103,19 @@ func NegotiatePack(
 			clientFormat = config.SHA1
 		}
 
+		requestFormat := clientFormat
 		if serverFormat != clientFormat {
-			return nil, fmt.Errorf("mismatched algorithms: client %s; server %s", clientFormat, serverFormat)
+			requestFormat = serverFormat
+
+			tp, ok := st.(xstorage.CompatTranslatorProvider)
+			if !ok || tp.Translator() == nil ||
+				tp.Translator().NativeObjectFormat() != clientFormat ||
+				tp.Translator().CompatObjectFormat() != serverFormat {
+				return nil, fmt.Errorf("mismatched algorithms: client %s; server %s", clientFormat, serverFormat)
+			}
 		}
 
-		_ = upreq.Capabilities.Set(capability.ObjectFormat, clientFormat.String())
+		_ = upreq.Capabilities.Set(capability.ObjectFormat, requestFormat.String())
 	}
 
 	if caps.Supports(capability.OFSDelta) {

@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/go-git/go-git/v6/plumbing"
+	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp/capability"
 	"github.com/go-git/go-git/v6/storage/memory"
 )
@@ -131,4 +132,32 @@ func TestNegotiatePackCompleteWithNonEOFCloseError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "closing writer")
 	assert.ErrorIs(t, err, io.ErrUnexpectedEOF)
+}
+
+func TestNegotiatePackAllowsCompatObjectFormat(t *testing.T) {
+	t.Parallel()
+
+	caps := capability.NewList()
+	require.NoError(t, caps.Set(capability.ObjectFormat, formatcfg.SHA1.String()))
+	conn := &mockConnection{caps: caps}
+
+	reader := bytes.NewReader([]byte("0008NAK\n"))
+	writer := newMockRWC(nil)
+
+	hashA := plumbing.NewHash("6ecf0ef2c2dffb796033e5a02219af86ec6584e5")
+	hashB := plumbing.NewHash("e8d3ffab552895c19b9fcf7aa264d277cde33881")
+	req := &FetchRequest{
+		Wants: []plumbing.Hash{hashA},
+		Haves: []plumbing.Hash{hashB},
+	}
+
+	storer := memory.NewStorage(
+		memory.WithObjectFormat(formatcfg.SHA256),
+		memory.WithCompatObjectFormat(formatcfg.SHA1),
+	)
+	shallows, err := NegotiatePack(context.TODO(), storer, conn, reader, writer, req)
+
+	require.NoError(t, err)
+	assert.Nil(t, shallows)
+	assert.Contains(t, writer.writeBuf.String(), "object-format=sha1")
 }
