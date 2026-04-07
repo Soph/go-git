@@ -7,6 +7,8 @@ import (
 	"io"
 
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/compat"
+	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/format/packfile"
 	"github.com/go-git/go-git/v6/plumbing/format/pktline"
 	"github.com/go-git/go-git/v6/plumbing/protocol"
@@ -15,7 +17,9 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp/sideband"
 	"github.com/go-git/go-git/v6/plumbing/storer"
 	"github.com/go-git/go-git/v6/storage"
+	"github.com/go-git/go-git/v6/storage/memory"
 	"github.com/go-git/go-git/v6/utils/ioutil"
+	xstorage "github.com/go-git/go-git/v6/x/storage"
 )
 
 // ReceivePackOptions is a set of options for the ReceivePack service.
@@ -113,7 +117,7 @@ func ReceivePack(
 	// Receive the packfile
 	var unpackErr error
 	if needPackfile {
-		unpackErr = packfile.UpdateObjectStorage(st, rd)
+		unpackErr = receivePackObjects(st, rd, updreq)
 	}
 
 	// Done with the request, now close the reader
@@ -165,6 +169,82 @@ func ReceivePack(
 		return firstErr
 	}
 	return closeWriter(w)
+}
+
+func receivePackObjects(st storage.Storer, rd io.Reader, updreq *packp.UpdateRequests) error {
+	requestFormat := requestObjectFormat(updreq)
+	serverFormat := storageObjectFormat(st)
+	if requestFormat == formatcfg.UnsetObjectFormat {
+		requestFormat = serverFormat
+	}
+
+	if requestFormat == serverFormat {
+		if err := packfile.UpdateObjectStorage(st, rd); err != nil {
+			return err
+		}
+		if tp, ok := st.(xstorage.CompatTranslatorProvider); ok && tp.Translator() != nil {
+			if tp.Translator().NativeObjectFormat() == serverFormat {
+				return compat.TranslateStoredObjects(st, tp.Translator())
+			}
+		}
+		return nil
+	}
+
+	tp, ok := st.(xstorage.CompatTranslatorProvider)
+	if !ok || tp.Translator() == nil ||
+		tp.Translator().NativeObjectFormat() != serverFormat ||
+		tp.Translator().CompatObjectFormat() != requestFormat {
+		return fmt.Errorf("mismatched algorithms: client %s; server %s", requestFormat, serverFormat)
+	}
+
+	tmp := memory.NewStorage(memory.WithObjectFormat(requestFormat))
+	if err := packfile.UpdateObjectStorage(tmp, rd); err != nil {
+		return err
+	}
+	if err := compat.ImportStoredObjects(tmp, st, tp.Translator()); err != nil {
+		return err
+	}
+
+	for _, cmd := range updreq.Commands {
+		cmd.Old = normalizeReceivePackHash(tp.Translator(), cmd.Old)
+		cmd.New = normalizeReceivePackHash(tp.Translator(), cmd.New)
+	}
+
+	return nil
+}
+
+func requestObjectFormat(updreq *packp.UpdateRequests) formatcfg.ObjectFormat {
+	if !updreq.Capabilities.Supports(capability.ObjectFormat) {
+		return formatcfg.UnsetObjectFormat
+	}
+	if values := updreq.Capabilities.Get(capability.ObjectFormat); len(values) > 0 {
+		switch of := formatcfg.ObjectFormat(values[0]); of {
+		case formatcfg.SHA1, formatcfg.SHA256:
+			return of
+		}
+	}
+	return formatcfg.UnsetObjectFormat
+}
+
+func storageObjectFormat(st storage.Storer) formatcfg.ObjectFormat {
+	cfg, err := st.Config()
+	if err == nil && cfg != nil && cfg.Extensions.ObjectFormat != formatcfg.UnsetObjectFormat {
+		return cfg.Extensions.ObjectFormat
+	}
+	return formatcfg.DefaultObjectFormat
+}
+
+func normalizeReceivePackHash(t *compat.Translator, h plumbing.Hash) plumbing.Hash {
+	if h == plumbing.ZeroHash {
+		return h
+	}
+
+	native, err := t.Mapping().CompatToNative(h)
+	if err != nil {
+		return h
+	}
+
+	return native
 }
 
 func closeWriter(w io.WriteCloser) error {

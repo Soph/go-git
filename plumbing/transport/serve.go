@@ -58,18 +58,18 @@ func AdvertiseReferences(
 		_ = ar.Capabilities.Set(capability.NoProgress)
 		_ = ar.Capabilities.Set(capability.SymRef)
 		_ = ar.Capabilities.Set(capability.Shallow)
-
-		cfg, err := st.Config()
-		var objectformat config.ObjectFormat
-		if err == nil && cfg != nil {
-			objectformat = cfg.Extensions.ObjectFormat
-		}
-
-		if objectformat == config.UnsetObjectFormat {
-			objectformat = config.DefaultObjectFormat
-		}
-		_ = ar.Capabilities.Set(capability.ObjectFormat, objectformat.String())
 	}
+
+	cfg, err := st.Config()
+	var objectformat config.ObjectFormat
+	if err == nil && cfg != nil {
+		objectformat = cfg.Extensions.ObjectFormat
+	}
+
+	if objectformat == config.UnsetObjectFormat {
+		objectformat = config.DefaultObjectFormat
+	}
+	_ = ar.Capabilities.Set(capability.ObjectFormat, objectformat.String())
 
 	// Set references
 	if err := addReferences(st, ar, !forPush); err != nil {

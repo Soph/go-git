@@ -724,6 +724,144 @@ func TestCloneWithCompatObjectFormatChecksOutWorktree(t *testing.T) {
 	}
 }
 
+func TestPushWithCompatObjectFormat(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		sourceTag    string
+		clientFormat formatcfg.ObjectFormat
+		compatFormat formatcfg.ObjectFormat
+	}{
+		{
+			name:         "sha1 client pushes to sha256 remote",
+			sourceTag:    ".git-sha256",
+			clientFormat: formatcfg.SHA1,
+			compatFormat: formatcfg.SHA256,
+		},
+		{
+			name:         "sha256 client pushes to sha1 remote",
+			sourceTag:    ".git",
+			clientFormat: formatcfg.SHA256,
+			compatFormat: formatcfg.SHA1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := fixtures.ByTag(tc.sourceTag).One()
+			require.NotNil(t, f, "fixture not found for tag %s", tc.sourceTag)
+
+			for _, srv := range server.All(server.Loader(t, f)) {
+				endpoint, err := srv.Start()
+				require.NoError(t, err)
+
+				t.Cleanup(func() {
+					require.NoError(t, srv.Close())
+				})
+
+				root := t.TempDir()
+				clientDir := filepath.Join(root, "client")
+				clientSt, clientWt := newCompatFilesystemStorage(t, clientDir, tc.clientFormat, tc.compatFormat)
+
+				r, err := Clone(clientSt, clientWt, &CloneOptions{URL: endpoint})
+				require.NoError(t, err)
+				head, err := r.Head()
+				require.NoError(t, err)
+
+				firstCommit := createCommit(t, r)
+				assert.Equal(t, tc.clientFormat.HexSize(), len(firstCommit.String()))
+
+				remoteDir := filepath.Join(root, "remote.git")
+				remote := initCompatBareRepository(t, remoteDir, tc.compatFormat, tc.clientFormat)
+
+				_, err = r.CreateRemote(&config.RemoteConfig{
+					Name: "push",
+					URLs: []string{remoteDir},
+				})
+				require.NoError(t, err)
+
+				err = r.Push(&PushOptions{RemoteName: "push"})
+				require.NoError(t, err)
+
+				secondCommit := createCommit(t, r)
+				assert.Equal(t, tc.clientFormat.HexSize(), len(secondCommit.String()))
+
+				err = r.Push(&PushOptions{RemoteName: "push"})
+				require.NoError(t, err)
+
+				remoteHead, err := remote.Reference(head.Name(), true)
+				require.NoError(t, err)
+				assert.Equal(t, tc.compatFormat.HexSize(), len(remoteHead.Hash().String()))
+
+				remoteCommit, err := remote.CommitObject(remoteHead.Hash())
+				require.NoError(t, err)
+				require.Len(t, remoteCommit.ParentHashes, 1)
+
+				remoteTr := requireCompatTranslator(t, remote.Storer)
+				headCompatHash, err := remoteTr.Mapping().NativeToCompat(remoteHead.Hash())
+				require.NoError(t, err)
+				assert.Equal(t, secondCommit, headCompatHash)
+
+				reopened, err := Open(
+					filesystem.NewStorage(osfs.New(remoteDir, osfs.WithBoundOS()), cache.NewObjectLRUDefault()),
+					nil,
+				)
+				require.NoError(t, err)
+
+				_, err = reopened.Storer.EncodedObject(plumbing.CommitObject, secondCommit)
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestCompatPushStorerTranslatesTreeContent(t *testing.T) {
+	t.Parallel()
+
+	f := fixtures.ByTag(".git-sha256").One()
+	require.NotNil(t, f)
+
+	for _, srv := range server.All(server.Loader(t, f)) {
+		endpoint, err := srv.Start()
+		require.NoError(t, err)
+
+		t.Cleanup(func() {
+			require.NoError(t, srv.Close())
+		})
+
+		dir := t.TempDir()
+		st, wt := newCompatFilesystemStorage(t, dir, formatcfg.SHA1, formatcfg.SHA256)
+		r, err := Clone(st, wt, &CloneOptions{URL: endpoint})
+		require.NoError(t, err)
+
+		head, err := r.Head()
+		require.NoError(t, err)
+		commit, err := r.CommitObject(normalizeObjectHash(r.Storer, head.Hash()))
+		require.NoError(t, err)
+
+		tr := requireCompatTranslator(t, r.Storer)
+		compatTreeHash, err := tr.Mapping().NativeToCompat(commit.TreeHash)
+		require.NoError(t, err)
+
+		pushStorer := &compatPushStorer{Storer: r.Storer, translator: tr}
+		obj, err := pushStorer.EncodedObject(plumbing.TreeObject, compatTreeHash)
+		require.NoError(t, err)
+
+		reader, err := obj.Reader()
+		require.NoError(t, err)
+		content, err := io.ReadAll(reader)
+		require.NoError(t, err)
+		require.NoError(t, reader.Close())
+
+		computed, err := tr.ComputeCompatHash(plumbing.TreeObject, content)
+		require.NoError(t, err)
+		assert.Equal(t, compatTreeHash, computed)
+	}
+}
+
 func requireCompatTranslator(t testing.TB, s storage.Storer) *compat.Translator {
 	t.Helper()
 
@@ -781,6 +919,30 @@ func newCompatFilesystemStorage(
 	require.NoError(t, err)
 
 	return filesystem.NewStorage(dot, cache.NewObjectLRUDefault()), wt
+}
+
+func initCompatBareRepository(
+	t testing.TB,
+	dir string,
+	native, compat formatcfg.ObjectFormat,
+) *Repository {
+	t.Helper()
+
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+
+	cfg := config.NewConfig()
+	cfg.Core.IsBare = true
+	cfg.Core.RepositoryFormatVersion = formatcfg.Version1
+	cfg.Extensions.ObjectFormat = native
+	cfg.Extensions.CompatObjectFormat = compat
+	data, err := cfg.Marshal()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config"), data, 0o644))
+
+	st := filesystem.NewStorage(osfs.New(dir, osfs.WithBoundOS()), cache.NewObjectLRUDefault())
+	r, err := Init(st)
+	require.NoError(t, err)
+	return r
 }
 
 // TestFetchByHashThenResolveRevision is a regression test for two bugs that

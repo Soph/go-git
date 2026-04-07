@@ -16,6 +16,8 @@ import (
 	"github.com/go-git/go-git/v6/internal/url"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/cache"
+	"github.com/go-git/go-git/v6/plumbing/compat"
+	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/format/packfile"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
@@ -28,6 +30,7 @@ import (
 	"github.com/go-git/go-git/v6/storage/memory"
 	"github.com/go-git/go-git/v6/utils/ioutil"
 	"github.com/go-git/go-git/v6/utils/trace"
+	xstorage "github.com/go-git/go-git/v6/x/storage"
 )
 
 // Remote operation errors and sentinel values.
@@ -129,6 +132,9 @@ func (r *Remote) PushContext(ctx context.Context, o *PushOptions) (err error) {
 	rRefs, err := conn.GetRemoteRefs(ctx)
 	if err != nil {
 		return err
+	}
+	for i, ref := range rRefs {
+		rRefs[i] = normalizeReferenceHash(r.s, ref)
 	}
 
 	remoteRefs := referenceStorageFromRefs(rRefs, true)
@@ -1412,19 +1418,24 @@ func pushHashes(
 	// ReceivePack fails. Otherwise the goroutine will be blocked writing
 	// to the channel.
 	done := make(chan error, 1)
+	reqObjectFormat, reqCmds, reqHashes, packStorer, err := preparePushRequest(conn, s, o.RemoteURL, cmds, hs)
+	if err != nil {
+		return err
+	}
 	req := &transport.PushRequest{
-		Commands: cmds,
-		Progress: o.Progress,
-		Options:  o.Options,
-		Atomic:   o.Atomic,
-		Quiet:    o.Quiet,
+		ObjectFormat: reqObjectFormat,
+		Commands:     reqCmds,
+		Progress:     o.Progress,
+		Options:      o.Options,
+		Atomic:       o.Atomic,
+		Quiet:        o.Quiet,
 	}
 
 	if !allDelete {
 		req.Packfile = rd
 		go func() {
-			e := packfile.NewEncoder(wr, s, useRefDeltas)
-			if _, err := e.Encode(hs, config.Pack.Window); err != nil {
+			e := packfile.NewEncoder(wr, packStorer, useRefDeltas)
+			if _, err := e.Encode(reqHashes, config.Pack.Window); err != nil {
 				done <- wr.CloseWithError(err)
 				return
 			}
@@ -1446,6 +1457,198 @@ func pushHashes(
 	}
 
 	return nil
+}
+
+func preparePushRequest(
+	conn transport.Connection,
+	s storage.Storer,
+	remoteURL string,
+	cmds []*packp.Command,
+	hs []plumbing.Hash,
+) (formatcfg.ObjectFormat, []*packp.Command, []plumbing.Hash, storer.EncodedObjectStorer, error) {
+	clientFormat := pushStorageObjectFormat(s)
+	serverFormat := pushRemoteObjectFormat(conn, remoteURL)
+	if serverFormat == formatcfg.UnsetObjectFormat {
+		serverFormat = clientFormat
+	}
+
+	requestFormat := clientFormat
+	if serverFormat != clientFormat {
+		tp, ok := s.(xstorage.CompatTranslatorProvider)
+		if !ok || tp.Translator() == nil ||
+			tp.Translator().NativeObjectFormat() != clientFormat ||
+			tp.Translator().CompatObjectFormat() != serverFormat {
+			return "", nil, nil, nil, fmt.Errorf("mismatched algorithms: client %s; server %s", clientFormat, serverFormat)
+		}
+
+		requestFormat = serverFormat
+		translatedCmds, err := translatePushCommands(cmds, tp.Translator())
+		if err != nil {
+			return "", nil, nil, nil, err
+		}
+		translatedHashes, err := translatePushHashes(hs, tp.Translator())
+		if err != nil {
+			return "", nil, nil, nil, err
+		}
+		return requestFormat, translatedCmds, translatedHashes, &compatPushStorer{
+			Storer:     s,
+			translator: tp.Translator(),
+		}, nil
+	}
+
+	return requestFormat, cmds, hs, s, nil
+}
+
+func pushStorageObjectFormat(s storage.Storer) formatcfg.ObjectFormat {
+	cfg, err := s.Config()
+	if err == nil && cfg != nil && cfg.Extensions.ObjectFormat != formatcfg.UnsetObjectFormat {
+		return cfg.Extensions.ObjectFormat
+	}
+	return formatcfg.DefaultObjectFormat
+}
+
+func pushRemoteObjectFormat(conn transport.Connection, remoteURL string) formatcfg.ObjectFormat {
+	caps := conn.Capabilities()
+	if !caps.Supports(capability.ObjectFormat) {
+		return pushLocalRemoteObjectFormat(remoteURL)
+	}
+	if values := caps.Get(capability.ObjectFormat); len(values) > 0 {
+		switch of := formatcfg.ObjectFormat(values[0]); of {
+		case formatcfg.SHA1, formatcfg.SHA256:
+			return of
+		}
+	}
+	return pushLocalRemoteObjectFormat(remoteURL)
+}
+
+func pushLocalRemoteObjectFormat(remoteURL string) formatcfg.ObjectFormat {
+	if !url.IsLocalEndpoint(remoteURL) {
+		return formatcfg.UnsetObjectFormat
+	}
+
+	st := filesystem.NewStorage(
+		osfs.New(remoteURL, osfs.WithBoundOS()),
+		cache.NewObjectLRUDefault(),
+	)
+	cfg, err := st.Config()
+	if err == nil && cfg != nil && cfg.Extensions.ObjectFormat != formatcfg.UnsetObjectFormat {
+		return cfg.Extensions.ObjectFormat
+	}
+
+	return formatcfg.DefaultObjectFormat
+}
+
+func translatePushCommands(cmds []*packp.Command, t *compat.Translator) ([]*packp.Command, error) {
+	translated := make([]*packp.Command, 0, len(cmds))
+	for _, cmd := range cmds {
+		oldHash, err := compatHashForPush(cmd.Old, t)
+		if err != nil {
+			return nil, err
+		}
+		newHash, err := compatHashForPush(cmd.New, t)
+		if err != nil {
+			return nil, err
+		}
+		translated = append(translated, &packp.Command{
+			Name: cmd.Name,
+			Old:  oldHash,
+			New:  newHash,
+		})
+	}
+	return translated, nil
+}
+
+func translatePushHashes(hs []plumbing.Hash, t *compat.Translator) ([]plumbing.Hash, error) {
+	translated := make([]plumbing.Hash, 0, len(hs))
+	for _, h := range hs {
+		compatHash, err := compatHashForPush(h, t)
+		if err != nil {
+			return nil, err
+		}
+		translated = append(translated, compatHash)
+	}
+	return translated, nil
+}
+
+func compatHashForPush(h plumbing.Hash, t *compat.Translator) (plumbing.Hash, error) {
+	if h == plumbing.ZeroHash {
+		return h, nil
+	}
+	compatHash, err := t.Mapping().NativeToCompat(h)
+	if err != nil {
+		return plumbing.Hash{}, fmt.Errorf("resolve compat hash for %s: %w", h, err)
+	}
+	return compatHash, nil
+}
+
+type compatPushStorer struct {
+	storage.Storer
+	translator *compat.Translator
+}
+
+func (s *compatPushStorer) Config() (*config.Config, error) {
+	cfg, err := s.Storer.Config()
+	if err != nil {
+		return nil, err
+	}
+
+	cloned := *cfg
+	cloned.Extensions = cfg.Extensions
+	cloned.Extensions.ObjectFormat = s.translator.CompatObjectFormat()
+	return &cloned, nil
+}
+
+func (s *compatPushStorer) NewEncodedObject() plumbing.EncodedObject {
+	return plumbing.NewMemoryObject(plumbing.FromObjectFormat(s.translator.CompatObjectFormat()))
+}
+
+func (s *compatPushStorer) EncodedObject(ot plumbing.ObjectType, h plumbing.Hash) (plumbing.EncodedObject, error) {
+	nativeHash, err := s.translator.Mapping().CompatToNative(h)
+	if err != nil {
+		return nil, plumbing.ErrObjectNotFound
+	}
+
+	obj, err := s.Storer.EncodedObject(ot, nativeHash)
+	if err != nil {
+		return nil, err
+	}
+
+	compatContent, err := compatPushObjectContent(obj, s.translator)
+	if err != nil {
+		return nil, err
+	}
+
+	translated := plumbing.NewMemoryObject(plumbing.FromObjectFormat(s.translator.CompatObjectFormat()))
+	translated.SetType(obj.Type())
+	translated.SetSize(int64(len(compatContent)))
+	w, err := translated.Writer()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := w.Write(compatContent); err != nil {
+		_ = w.Close()
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+
+	return translated, nil
+}
+
+func compatPushObjectContent(obj plumbing.EncodedObject, t *compat.Translator) ([]byte, error) {
+	reader, err := obj.Reader()
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+
+	content, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+
+	return t.ReverseTranslateContent(obj.Type(), content)
 }
 
 func (r *Remote) checkRequireRemoteRefs(requires []config.RefSpec, remoteRefs storer.ReferenceStorer) error {

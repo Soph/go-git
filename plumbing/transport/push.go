@@ -60,6 +60,9 @@ func buildUpdateRequests(caps *capability.List, req *PushRequest) *packp.UpdateR
 	if caps.Supports(capability.Agent) {
 		_ = upreq.Capabilities.Set(capability.Agent, capability.DefaultAgent())
 	}
+	if req.ObjectFormat != "" && caps.Supports(capability.ObjectFormat) {
+		_ = upreq.Capabilities.Set(capability.ObjectFormat, req.ObjectFormat.String())
+	}
 
 	upreq.Commands = req.Commands
 

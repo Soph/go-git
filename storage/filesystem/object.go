@@ -821,9 +821,13 @@ func (s *ObjectStorage) buildPackfileIters(
 			if err != nil {
 				return nil, err
 			}
+			objectIDSize := crypto.SHA1.Size()
+			if s.oh != nil {
+				objectIDSize = s.oh.Size()
+			}
 			return newPackfileIter(
 				s.dir.Fs(), pack, t, seen, s.index[h],
-				s.objectCache, s.options.KeepDescriptors, crypto.SHA1.Size(),
+				s.objectCache, s.options.KeepDescriptors, objectIDSize,
 			)
 		},
 	}, nil

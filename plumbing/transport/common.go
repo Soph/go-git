@@ -11,6 +11,7 @@ import (
 	"io"
 
 	"github.com/go-git/go-git/v6/plumbing"
+	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/protocol"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp/capability"
@@ -113,6 +114,9 @@ type FetchRequest struct {
 type PushRequest struct {
 	// Packfile is the packfile reader.
 	Packfile io.ReadCloser
+
+	// ObjectFormat is the hash algorithm used by the command hashes and packfile.
+	ObjectFormat formatcfg.ObjectFormat
 
 	// Commands is the list of push commands to be sent to the server.
 	// TODO: build the Commands slice in the transport package.
