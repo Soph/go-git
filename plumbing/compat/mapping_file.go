@@ -2,6 +2,7 @@ package compat
 
 import (
 	"bufio"
+	"container/list"
 	"fmt"
 	"os"
 	"strings"
@@ -20,18 +21,19 @@ const looseObjectIdxFile = "loose-object-idx"
 //
 //	<native-hex> <compat-hex>\n
 //
-// The file is lazily loaded on first access and cached in memory.
+// The file remains the source of truth; a bounded in-memory cache keeps
+// repeated lookups fast without retaining the full mapping set.
 type FileMapping struct {
-	mu       sync.RWMutex
-	loadOnce sync.Once
-	loadErr  error
-	fs       billy.Filesystem
-	path     string // directory containing the idx file
+	mu   sync.RWMutex
+	fs   billy.Filesystem
+	path string // directory containing the idx file
 
 	appendFile     billy.File
-	nativeToCompat map[plumbing.Hash]plumbing.Hash
-	compatToNative map[plumbing.Hash]plumbing.Hash
+	nativeToCompat *mappingCache
+	compatToNative *mappingCache
 }
+
+const fileMappingCacheSize = 4096
 
 // NewFileMapping creates a FileMapping backed by the given filesystem and
 // directory path (typically the objects directory, e.g. ".git/objects").
@@ -39,8 +41,8 @@ func NewFileMapping(fs billy.Filesystem, path string) *FileMapping {
 	return &FileMapping{
 		fs:             fs,
 		path:           path,
-		nativeToCompat: make(map[plumbing.Hash]plumbing.Hash),
-		compatToNative: make(map[plumbing.Hash]plumbing.Hash),
+		nativeToCompat: newMappingCache(fileMappingCacheSize),
+		compatToNative: newMappingCache(fileMappingCacheSize),
 	}
 }
 
@@ -48,89 +50,140 @@ func (m *FileMapping) idxPath() string {
 	return m.fs.Join(m.path, looseObjectIdxFile)
 }
 
-// load reads the loose-object-idx file into memory. Must be called
-// exactly once via loadOnce before accessing the maps.
-func (m *FileMapping) load() error {
+func (m *FileMapping) openIdx() (billy.File, error) {
 	f, err := m.fs.Open(m.idxPath())
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return nil, nil
 		}
-		return fmt.Errorf("open loose-object-idx: %w", err)
+		return nil, fmt.Errorf("open loose-object-idx: %w", err)
 	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-
-		parts := strings.SplitN(line, " ", 2)
-		if len(parts) != 2 {
-			continue // skip malformed lines
-		}
-
-		native, nok := plumbing.FromHex(parts[0])
-		compat, cok := plumbing.FromHex(parts[1])
-		if !nok || !cok {
-			continue // skip malformed hashes
-		}
-
-		m.nativeToCompat[native] = compat
-		m.compatToNative[compat] = native
-	}
-
-	return scanner.Err()
-}
-
-func (m *FileMapping) ensureLoaded() error {
-	m.loadOnce.Do(func() {
-		m.loadErr = m.load()
-	})
-	return m.loadErr
+	return f, nil
 }
 
 func (m *FileMapping) NativeToCompat(native plumbing.Hash) (plumbing.Hash, error) {
-	if err := m.ensureLoaded(); err != nil {
+	m.mu.RLock()
+	if h, ok := m.nativeToCompat.get(native); ok {
+		m.mu.RUnlock()
+		return h, nil
+	}
+	m.mu.RUnlock()
+
+	h, err := m.scanNativeToCompat(native)
+	if err != nil {
 		return plumbing.Hash{}, err
 	}
 
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	m.nativeToCompat.add(native, h)
+	m.compatToNative.add(h, native)
+	m.mu.Unlock()
 
-	h, ok := m.nativeToCompat[native]
-	if !ok {
-		return plumbing.Hash{}, plumbing.ErrObjectNotFound
-	}
 	return h, nil
 }
 
 func (m *FileMapping) CompatToNative(compat plumbing.Hash) (plumbing.Hash, error) {
-	if err := m.ensureLoaded(); err != nil {
+	m.mu.RLock()
+	if h, ok := m.compatToNative.get(compat); ok {
+		m.mu.RUnlock()
+		return h, nil
+	}
+	m.mu.RUnlock()
+
+	h, err := m.scanCompatToNative(compat)
+	if err != nil {
 		return plumbing.Hash{}, err
 	}
 
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	m.compatToNative.add(compat, h)
+	m.nativeToCompat.add(h, compat)
+	m.mu.Unlock()
 
-	h, ok := m.compatToNative[compat]
-	if !ok {
-		return plumbing.Hash{}, plumbing.ErrObjectNotFound
-	}
 	return h, nil
 }
 
-func (m *FileMapping) Add(native, compat plumbing.Hash) error {
-	if err := m.ensureLoaded(); err != nil {
-		return err
+func (m *FileMapping) scanNativeToCompat(target plumbing.Hash) (plumbing.Hash, error) {
+	f, err := m.openIdx()
+	if err != nil {
+		return plumbing.Hash{}, err
 	}
+	if f == nil {
+		return plumbing.Hash{}, plumbing.ErrObjectNotFound
+	}
+	defer f.Close()
 
+	var (
+		found  bool
+		compat plumbing.Hash
+	)
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		native, currentCompat, ok := parseMappingLine(scanner.Text())
+		if !ok {
+			continue
+		}
+		if native.Equal(target) {
+			compat = currentCompat
+			found = true
+			continue
+		}
+		if found && currentCompat.Equal(compat) {
+			found = false
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return plumbing.Hash{}, err
+	}
+	if !found {
+		return plumbing.Hash{}, plumbing.ErrObjectNotFound
+	}
+	return compat, nil
+}
+
+func (m *FileMapping) scanCompatToNative(target plumbing.Hash) (plumbing.Hash, error) {
+	f, err := m.openIdx()
+	if err != nil {
+		return plumbing.Hash{}, err
+	}
+	if f == nil {
+		return plumbing.Hash{}, plumbing.ErrObjectNotFound
+	}
+	defer f.Close()
+
+	var (
+		found  bool
+		native plumbing.Hash
+	)
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		currentNative, compat, ok := parseMappingLine(scanner.Text())
+		if !ok {
+			continue
+		}
+		if compat.Equal(target) {
+			native = currentNative
+			found = true
+			continue
+		}
+		if found && currentNative.Equal(native) {
+			found = false
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return plumbing.Hash{}, err
+	}
+	if !found {
+		return plumbing.Hash{}, plumbing.ErrObjectNotFound
+	}
+	return native, nil
+}
+
+func (m *FileMapping) Add(native, compat plumbing.Hash) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if existing, ok := m.nativeToCompat[native]; ok && existing.Equal(compat) {
+	if existing, ok := m.nativeToCompat.get(native); ok && existing.Equal(compat) {
 		return nil
 	}
 
@@ -149,14 +202,14 @@ func (m *FileMapping) Add(native, compat plumbing.Hash) error {
 		}
 	}
 
-	if existing, ok := m.nativeToCompat[native]; ok {
-		delete(m.compatToNative, existing)
+	if existing, ok := m.nativeToCompat.get(native); ok {
+		m.compatToNative.delete(existing)
 	}
-	if existing, ok := m.compatToNative[compat]; ok {
-		delete(m.nativeToCompat, existing)
+	if existing, ok := m.compatToNative.get(compat); ok {
+		m.nativeToCompat.delete(existing)
 	}
-	m.nativeToCompat[native] = compat
-	m.compatToNative[compat] = native
+	m.nativeToCompat.add(native, compat)
+	m.compatToNative.add(compat, native)
 
 	return nil
 }
@@ -175,10 +228,103 @@ func (m *FileMapping) ensureAppendFile() (billy.File, error) {
 }
 
 func (m *FileMapping) Count() int {
-	_ = m.ensureLoaded()
+	f, err := m.openIdx()
+	if err != nil || f == nil {
+		return 0
+	}
+	defer f.Close()
 
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	nativeToCompat := make(map[plumbing.Hash]plumbing.Hash)
+	compatToNative := make(map[plumbing.Hash]plumbing.Hash)
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		native, compat, ok := parseMappingLine(scanner.Text())
+		if !ok {
+			continue
+		}
+		if existing, ok := nativeToCompat[native]; ok {
+			delete(compatToNative, existing)
+		}
+		if existing, ok := compatToNative[compat]; ok {
+			delete(nativeToCompat, existing)
+		}
+		nativeToCompat[native] = compat
+		compatToNative[compat] = native
+	}
 
-	return len(m.nativeToCompat)
+	return len(nativeToCompat)
+}
+
+func parseMappingLine(line string) (plumbing.Hash, plumbing.Hash, bool) {
+	fields := strings.Fields(line)
+	if len(fields) != 2 {
+		return plumbing.Hash{}, plumbing.Hash{}, false
+	}
+
+	native, nok := plumbing.FromHex(fields[0])
+	compat, cok := plumbing.FromHex(fields[1])
+	if !nok || !cok {
+		return plumbing.Hash{}, plumbing.Hash{}, false
+	}
+
+	return native, compat, true
+}
+
+type mappingCache struct {
+	capacity int
+	order    *list.List
+	entries  map[plumbing.Hash]*list.Element
+}
+
+type mappingCacheEntry struct {
+	key   plumbing.Hash
+	value plumbing.Hash
+}
+
+func newMappingCache(capacity int) *mappingCache {
+	return &mappingCache{
+		capacity: capacity,
+		order:    list.New(),
+		entries:  make(map[plumbing.Hash]*list.Element),
+	}
+}
+
+func (c *mappingCache) get(key plumbing.Hash) (plumbing.Hash, bool) {
+	elem, ok := c.entries[key]
+	if !ok {
+		return plumbing.Hash{}, false
+	}
+	return elem.Value.(*mappingCacheEntry).value, true
+}
+
+func (c *mappingCache) add(key, value plumbing.Hash) {
+	if c.capacity <= 0 {
+		return
+	}
+	if elem, ok := c.entries[key]; ok {
+		elem.Value.(*mappingCacheEntry).value = value
+		return
+	}
+
+	elem := c.order.PushBack(&mappingCacheEntry{key: key, value: value})
+	c.entries[key] = elem
+	if len(c.entries) <= c.capacity {
+		return
+	}
+
+	oldest := c.order.Front()
+	if oldest == nil {
+		return
+	}
+	c.order.Remove(oldest)
+	delete(c.entries, oldest.Value.(*mappingCacheEntry).key)
+}
+
+func (c *mappingCache) delete(key plumbing.Hash) {
+	elem, ok := c.entries[key]
+	if !ok {
+		return
+	}
+	c.order.Remove(elem)
+	delete(c.entries, key)
 }

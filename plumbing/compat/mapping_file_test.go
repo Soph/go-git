@@ -2,6 +2,7 @@ package compat
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"testing"
@@ -85,6 +86,53 @@ func TestFileMappingAddSyncsAndReusesAppendHandle(t *testing.T) {
 	assert.Equal(t, 1, fs.openCount)
 	require.NotNil(t, fs.lastFile)
 	assert.Equal(t, 2, fs.lastFile.syncCount)
+}
+
+func TestFileMappingPersistenceResolvesLatestMapping(t *testing.T) {
+	fs := memfs.New()
+	_ = fs.MkdirAll("objects", 0755)
+
+	native1 := plumbing.NewHash("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	compat1 := plumbing.NewHash("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	native2 := plumbing.NewHash("cccccccccccccccccccccccccccccccccccccccc")
+	compat2 := plumbing.NewHash("dddddddddddddddddddddddddddddddddddddddd")
+
+	m1 := NewFileMapping(fs, "objects")
+	require.NoError(t, m1.Add(native1, compat1))
+	require.NoError(t, m1.Add(native2, compat1))
+	require.NoError(t, m1.Add(native2, compat2))
+
+	m2 := NewFileMapping(fs, "objects")
+
+	_, err := m2.NativeToCompat(native1)
+	assert.ErrorIs(t, err, plumbing.ErrObjectNotFound)
+
+	gotCompat, err := m2.NativeToCompat(native2)
+	require.NoError(t, err)
+	assert.True(t, gotCompat.Equal(compat2))
+
+	gotNative, err := m2.CompatToNative(compat2)
+	require.NoError(t, err)
+	assert.True(t, gotNative.Equal(native2))
+
+	_, err = m2.CompatToNative(compat1)
+	assert.ErrorIs(t, err, plumbing.ErrObjectNotFound)
+}
+
+func TestFileMappingKeepsBoundedCache(t *testing.T) {
+	fs := memfs.New()
+	_ = fs.MkdirAll("objects", 0755)
+
+	m := NewFileMapping(fs, "objects")
+	for i := 0; i < fileMappingCacheSize*2; i++ {
+		native := plumbing.NewHash(fmt.Sprintf("%040x", i+1))
+		compat := plumbing.NewHash(fmt.Sprintf("%040x", i+fileMappingCacheSize+1))
+		require.NoError(t, m.Add(native, compat))
+	}
+
+	assert.LessOrEqual(t, len(m.nativeToCompat.entries), fileMappingCacheSize)
+	assert.LessOrEqual(t, len(m.compatToNative.entries), fileMappingCacheSize)
+	assert.Equal(t, fileMappingCacheSize*2, m.Count())
 }
 
 type failingOpenFileFS struct {
