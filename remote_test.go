@@ -689,6 +689,28 @@ func (s *RemoteSuite) TestCompatHashForPushZeroSHA256() {
 	s.Equal(zero.String(), h.String())
 }
 
+func (s *RemoteSuite) TestPushLocalRemoteObjectFormat() {
+	dir := s.T().TempDir()
+	r, err := PlainInit(dir, true)
+	s.Require().NoError(err)
+
+	cfg, err := r.Storer.Config()
+	s.Require().NoError(err)
+	cfg.Core.RepositoryFormatVersion = formatcfg.Version1
+	cfg.Extensions.ObjectFormat = formatcfg.SHA256
+	s.Require().NoError(r.Storer.SetConfig(cfg))
+
+	s.Equal(formatcfg.SHA256, pushLocalRemoteObjectFormat(dir))
+}
+
+func (s *RemoteSuite) TestPushLocalRemoteObjectFormatDefaultsToSHA1() {
+	dir := s.T().TempDir()
+	_, err := PlainInit(dir, true)
+	s.Require().NoError(err)
+
+	s.Equal(formatcfg.DefaultObjectFormat, pushLocalRemoteObjectFormat(dir))
+}
+
 func (s *RemoteSuite) TestPushContextCanceled() {
 	url := s.T().TempDir()
 	_, err := PlainInit(url, true)

@@ -1523,13 +1523,14 @@ func pushLocalRemoteObjectFormat(remoteURL string) formatcfg.ObjectFormat {
 		return formatcfg.UnsetObjectFormat
 	}
 
-	st := filesystem.NewStorage(
-		osfs.New(remoteURL, osfs.WithBoundOS()),
-		cache.NewObjectLRUDefault(),
-	)
-	cfg, err := st.Config()
-	if err == nil && cfg != nil && cfg.Extensions.ObjectFormat != formatcfg.UnsetObjectFormat {
-		return cfg.Extensions.ObjectFormat
+	fs := osfs.New(remoteURL, osfs.WithBoundOS())
+	f, err := fs.Open("config")
+	if err == nil {
+		defer f.Close()
+		cfg, err := config.ReadConfig(f)
+		if err == nil && cfg.Extensions.ObjectFormat != formatcfg.UnsetObjectFormat {
+			return cfg.Extensions.ObjectFormat
+		}
 	}
 
 	return formatcfg.DefaultObjectFormat
