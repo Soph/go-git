@@ -30,6 +30,13 @@ func TestNormalizeHash(t *testing.T) {
 
 	unknown := plumbing.NewHash("cccccccccccccccccccccccccccccccccccccccc")
 	assert.Equal(t, unknown, NormalizeHash(tr, unknown))
+
+	resolved, err := ResolveHash(tr, compat)
+	require.NoError(t, err)
+	assert.Equal(t, native, resolved)
+
+	_, err = ResolveHash(tr, unknown)
+	assert.ErrorIs(t, err, plumbing.ErrObjectNotFound)
 }
 
 func TestNormalizeStorageHashAndReference(t *testing.T) {
@@ -47,6 +54,9 @@ func TestNormalizeStorageHashAndReference(t *testing.T) {
 	require.NoError(t, tr.Mapping().Add(native, compat))
 
 	assert.Equal(t, native, NormalizeStorageHash(st, compat))
+	resolved, err := ResolveStorageHash(st, compat)
+	require.NoError(t, err)
+	assert.Equal(t, native, resolved)
 
 	ref := plumbing.NewHashReference("refs/heads/main", compat)
 	normalized := NormalizeReference(st, ref)
@@ -55,4 +65,8 @@ func TestNormalizeStorageHashAndReference(t *testing.T) {
 
 	symbolic := plumbing.NewSymbolicReference(plumbing.HEAD, "refs/heads/main")
 	assert.Equal(t, symbolic, NormalizeReference(st, symbolic))
+
+	unknown := plumbing.NewHash("cccccccccccccccccccccccccccccccccccccccc")
+	_, err = ResolveStorageHash(st, unknown)
+	assert.ErrorIs(t, err, plumbing.ErrObjectNotFound)
 }
