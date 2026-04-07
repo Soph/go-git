@@ -17,7 +17,6 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp/sideband"
 	"github.com/go-git/go-git/v6/plumbing/storer"
 	"github.com/go-git/go-git/v6/storage"
-	"github.com/go-git/go-git/v6/storage/memory"
 	"github.com/go-git/go-git/v6/utils/ioutil"
 	xstorage "github.com/go-git/go-git/v6/x/storage"
 )
@@ -197,7 +196,11 @@ func receivePackObjects(st storage.Storer, rd io.Reader, updreq *packp.UpdateReq
 		return fmt.Errorf("mismatched algorithms: client %s; server %s", requestFormat, serverFormat)
 	}
 
-	tmp := memory.NewStorage(memory.WithObjectFormat(requestFormat))
+	tmp, cleanup, err := newCompatTempStorage(requestFormat)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
 	if err := packfile.UpdateObjectStorage(tmp, rd); err != nil {
 		return err
 	}
