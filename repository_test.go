@@ -955,6 +955,106 @@ func TestCompatPushStorerTranslatesTreeContent(t *testing.T) {
 	}
 }
 
+func TestCompatPushStorerConfigUsesCompatFormat(t *testing.T) {
+	t.Parallel()
+
+	st := memory.NewStorage(
+		memory.WithObjectFormat(formatcfg.SHA1),
+		memory.WithCompatObjectFormat(formatcfg.SHA256),
+	)
+	tr := st.Translator()
+	require.NotNil(t, tr)
+
+	pushStorer := &compatPushStorer{Storer: st, translator: tr}
+	cfg, err := pushStorer.Config()
+	require.NoError(t, err)
+	assert.Equal(t, formatcfg.SHA256, cfg.Extensions.ObjectFormat)
+
+	original, err := st.Config()
+	require.NoError(t, err)
+	assert.Equal(t, formatcfg.SHA1, original.Extensions.ObjectFormat)
+}
+
+func TestCompatPushStorerMissingMappingReturnsObjectNotFound(t *testing.T) {
+	t.Parallel()
+
+	st := memory.NewStorage(
+		memory.WithObjectFormat(formatcfg.SHA1),
+		memory.WithCompatObjectFormat(formatcfg.SHA256),
+	)
+	tr := st.Translator()
+	require.NotNil(t, tr)
+
+	pushStorer := &compatPushStorer{Storer: st, translator: tr}
+	_, err := pushStorer.EncodedObject(plumbing.CommitObject, plumbing.NewHash(strings.Repeat("a", formatcfg.SHA256.HexSize())))
+	assert.ErrorIs(t, err, plumbing.ErrObjectNotFound)
+}
+
+func TestCompatPushStorerTranslatesCommitContent(t *testing.T) {
+	t.Parallel()
+
+	st := memory.NewStorage(
+		memory.WithObjectFormat(formatcfg.SHA1),
+		memory.WithCompatObjectFormat(formatcfg.SHA256),
+	)
+	tr := st.Translator()
+	require.NotNil(t, tr)
+
+	oh := plumbing.FromObjectFormat(formatcfg.SHA1)
+	blob := plumbing.NewMemoryObject(oh)
+	blob.SetType(plumbing.BlobObject)
+	_, err := blob.Write([]byte("data"))
+	require.NoError(t, err)
+	blob.SetSize(4)
+	blobHash, err := st.SetEncodedObject(blob)
+	require.NoError(t, err)
+
+	var treeContent []byte
+	treeContent = append(treeContent, []byte("100644 f.txt")...)
+	treeContent = append(treeContent, 0x00)
+	treeContent = append(treeContent, blobHash.Bytes()...)
+	tree := plumbing.NewMemoryObject(oh)
+	tree.SetType(plumbing.TreeObject)
+	_, err = tree.Write(treeContent)
+	require.NoError(t, err)
+	tree.SetSize(int64(len(treeContent)))
+	treeHash, err := st.SetEncodedObject(tree)
+	require.NoError(t, err)
+
+	commitText := "tree " + treeHash.String() + "\n" +
+		"author A <a@b.c> 100 +0000\n" +
+		"committer A <a@b.c> 100 +0000\n" +
+		"\n" +
+		"root\n"
+	commit := plumbing.NewMemoryObject(oh)
+	commit.SetType(plumbing.CommitObject)
+	_, err = commit.Write([]byte(commitText))
+	require.NoError(t, err)
+	commit.SetSize(int64(len(commitText)))
+	commitHash, err := st.SetEncodedObject(commit)
+	require.NoError(t, err)
+
+	compatCommitHash, err := tr.Mapping().NativeToCompat(commitHash)
+	require.NoError(t, err)
+	compatTreeHash, err := tr.Mapping().NativeToCompat(treeHash)
+	require.NoError(t, err)
+
+	pushStorer := &compatPushStorer{Storer: st, translator: tr}
+	obj, err := pushStorer.EncodedObject(plumbing.CommitObject, compatCommitHash)
+	require.NoError(t, err)
+
+	reader, err := obj.Reader()
+	require.NoError(t, err)
+	content, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+
+	assert.Contains(t, string(content), "tree "+compatTreeHash.String())
+	computed, err := tr.ComputeCompatHash(plumbing.CommitObject, content)
+	require.NoError(t, err)
+	assert.Equal(t, compatCommitHash, computed)
+}
+
 type taggedRepositorySource struct {
 	path             string
 	commitHash       plumbing.Hash

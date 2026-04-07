@@ -152,6 +152,33 @@ func TestTranslateStoredObjectsTagOfTag(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestTranslateStoredObjectsMissingDependency(t *testing.T) {
+	s := memory.NewStorage(memory.WithObjectFormat(format.SHA1))
+	oh := plumbing.FromObjectFormat(format.SHA1)
+
+	var treeContent []byte
+	treeContent = append(treeContent, []byte("100644 orphan.txt")...)
+	treeContent = append(treeContent, 0x00)
+	treeContent = append(treeContent, plumbing.NewHash("1111111111111111111111111111111111111111").Bytes()...)
+
+	tree := plumbing.NewMemoryObject(oh)
+	tree.SetType(plumbing.TreeObject)
+	tree.Write(treeContent)
+	tree.SetSize(int64(len(treeContent)))
+	_, err := s.ObjectStorage.SetEncodedObject(tree)
+	require.NoError(t, err)
+
+	m := compat.NewMemoryMapping()
+	tr := compat.NewTranslator(compat.Formats{
+		Native: format.SHA1,
+		Compat: format.SHA256,
+	}, m)
+
+	err = compat.TranslateStoredObjects(s, tr)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, compat.ErrMissingDependencyMapping)
+}
+
 func TestImportStoredObjects(t *testing.T) {
 	src := memory.NewStorage(memory.WithObjectFormat(format.SHA1))
 	dst := memory.NewStorage(
