@@ -3,7 +3,10 @@ package transport
 import (
 	"context"
 	"io"
+	"os"
 
+	"github.com/go-git/go-billy/v6/osfs"
+	"github.com/go-git/go-git/v6/plumbing/cache"
 	"github.com/go-git/go-git/v6/plumbing/compat"
 	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/format/packfile"
@@ -11,7 +14,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp/capability"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp/sideband"
 	"github.com/go-git/go-git/v6/storage"
-	"github.com/go-git/go-git/v6/storage/memory"
+	"github.com/go-git/go-git/v6/storage/filesystem"
 	"github.com/go-git/go-git/v6/utils/ioutil"
 	xstorage "github.com/go-git/go-git/v6/x/storage"
 )
@@ -47,7 +50,20 @@ func FetchPack(
 		if t := tp.Translator(); t != nil {
 			remoteFormat := remoteObjectFormat(conn)
 			if remoteFormat == t.CompatObjectFormat() && remoteFormat != t.NativeObjectFormat() {
-				tmp := memory.NewStorage(memory.WithObjectFormat(remoteFormat))
+				tmpDir, err := os.MkdirTemp("", "go-git-compat-fetch-*")
+				if err != nil {
+					return err
+				}
+				defer os.RemoveAll(tmpDir)
+
+				tmp := filesystem.NewStorageWithOptions(
+					osfs.New(tmpDir, osfs.WithBoundOS()),
+					cache.NewObjectLRUDefault(),
+					filesystem.Options{ObjectFormat: remoteFormat},
+				)
+				if err := tmp.Init(); err != nil {
+					return err
+				}
 				if err := packfile.UpdateObjectStorage(tmp, reader); err != nil {
 					return err
 				}
