@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-git/go-git/v6/internal/compatutil"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/compat"
 	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
@@ -40,7 +41,7 @@ func (s *ReceivePackSuite) TestNormalizeObjectHashZeroSHA256() {
 		Compat: formatcfg.SHA256,
 	}, compat.NewMemoryMapping())
 
-	h := normalizeObjectHash(tr, zero)
+	h := compatutil.NormalizeHash(tr, zero)
 	s.True(h.IsZero())
 	s.Equal(zero.String(), h.String())
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/go-git/go-git/v6/internal/compatutil"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/compat"
 	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
@@ -209,8 +210,8 @@ func receivePackObjects(st storage.Storer, rd io.Reader, updreq *packp.UpdateReq
 	}
 
 	for _, cmd := range updreq.Commands {
-		cmd.Old = normalizeObjectHash(tp.Translator(), cmd.Old)
-		cmd.New = normalizeObjectHash(tp.Translator(), cmd.New)
+		cmd.Old = compatutil.NormalizeHash(tp.Translator(), cmd.Old)
+		cmd.New = compatutil.NormalizeHash(tp.Translator(), cmd.New)
 	}
 
 	return nil
@@ -235,19 +236,6 @@ func storageObjectFormat(st storage.Storer) formatcfg.ObjectFormat {
 		return cfg.Extensions.ObjectFormat
 	}
 	return formatcfg.DefaultObjectFormat
-}
-
-func normalizeObjectHash(t *compat.Translator, h plumbing.Hash) plumbing.Hash {
-	if h.IsZero() {
-		return h
-	}
-
-	native, err := t.Mapping().CompatToNative(h)
-	if err != nil {
-		return h
-	}
-
-	return native
 }
 
 func closeWriter(w io.WriteCloser) error {

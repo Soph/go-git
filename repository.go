@@ -16,6 +16,7 @@ import (
 	"github.com/go-git/go-billy/v6/osfs"
 
 	"github.com/go-git/go-git/v6/config"
+	"github.com/go-git/go-git/v6/internal/compatutil"
 	"github.com/go-git/go-git/v6/internal/pathutil"
 	"github.com/go-git/go-git/v6/internal/revision"
 	"github.com/go-git/go-git/v6/internal/url"
@@ -32,7 +33,6 @@ import (
 	"github.com/go-git/go-git/v6/utils/ioutil"
 	"github.com/go-git/go-git/v6/utils/trace"
 	"github.com/go-git/go-git/v6/x/plugin"
-	xstorage "github.com/go-git/go-git/v6/x/storage"
 )
 
 // GitDirName this is a special folder where all the git stuff is.
@@ -635,25 +635,11 @@ func newRepository(s storage.Storer, worktree billy.Filesystem) *Repository {
 }
 
 func normalizeObjectHash(s storage.Storer, h plumbing.Hash) plumbing.Hash {
-	tp, ok := s.(xstorage.CompatTranslatorProvider)
-	if !ok || tp.Translator() == nil {
-		return h
-	}
-
-	native, err := tp.Translator().Mapping().CompatToNative(h)
-	if err != nil {
-		return h
-	}
-
-	return native
+	return compatutil.NormalizeStorageHash(s, h)
 }
 
 func normalizeReferenceHash(s storage.Storer, ref *plumbing.Reference) *plumbing.Reference {
-	if ref == nil || ref.Type() != plumbing.HashReference {
-		return ref
-	}
-
-	return plumbing.NewHashReference(ref.Name(), normalizeObjectHash(s, ref.Hash()))
+	return compatutil.NormalizeReference(s, ref)
 }
 
 func checkTargetDirIsEmpty(path string) (empty bool, err error) {
