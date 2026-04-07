@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/go-git/go-billy/v6"
@@ -133,6 +134,84 @@ func TestFileMappingKeepsBoundedCache(t *testing.T) {
 	assert.LessOrEqual(t, len(m.nativeToCompat.entries), fileMappingCacheSize)
 	assert.LessOrEqual(t, len(m.compatToNative.entries), fileMappingCacheSize)
 	assert.Equal(t, fileMappingCacheSize*2, m.Count())
+}
+
+func TestFileMappingSkipsMalformedLines(t *testing.T) {
+	fs := memfs.New()
+	_ = fs.MkdirAll("objects", 0755)
+
+	f, err := fs.Create("objects/" + looseObjectIdxFile)
+	require.NoError(t, err)
+	_, err = io.WriteString(f, "not-a-mapping\n")
+	require.NoError(t, err)
+	_, err = io.WriteString(f, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
+	require.NoError(t, err)
+	_, err = io.WriteString(f, "zzzz zzzz\n")
+	require.NoError(t, err)
+	_, err = io.WriteString(f, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	m := NewFileMapping(fs, "objects")
+	got, err := m.NativeToCompat(plumbing.NewHash("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+	require.NoError(t, err)
+	assert.True(t, got.Equal(plumbing.NewHash("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")))
+	assert.Equal(t, 1, m.Count())
+}
+
+func TestFileMappingConcurrentLookups(t *testing.T) {
+	fs := memfs.New()
+	_ = fs.MkdirAll("objects", 0755)
+
+	m := NewFileMapping(fs, "objects")
+	type pair struct {
+		native plumbing.Hash
+		compat plumbing.Hash
+	}
+	pairs := make([]pair, 64)
+	for i := range pairs {
+		pairs[i] = pair{
+			native: plumbing.NewHash(fmt.Sprintf("%040x", i+1)),
+			compat: plumbing.NewHash(fmt.Sprintf("%040x", i+1025)),
+		}
+		require.NoError(t, m.Add(pairs[i].native, pairs[i].compat))
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 16)
+	for g := 0; g < 16; g++ {
+		wg.Add(1)
+		go func(offset int) {
+			defer wg.Done()
+			for i := 0; i < 500; i++ {
+				p := pairs[(i+offset)%len(pairs)]
+				gotCompat, err := m.NativeToCompat(p.native)
+				if err != nil {
+					errCh <- err
+					return
+				}
+				if !gotCompat.Equal(p.compat) {
+					errCh <- fmt.Errorf("native lookup mismatch: got %s want %s", gotCompat, p.compat)
+					return
+				}
+
+				gotNative, err := m.CompatToNative(p.compat)
+				if err != nil {
+					errCh <- err
+					return
+				}
+				if !gotNative.Equal(p.native) {
+					errCh <- fmt.Errorf("compat lookup mismatch: got %s want %s", gotNative, p.native)
+					return
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		require.NoError(t, err)
+	}
 }
 
 type failingOpenFileFS struct {
