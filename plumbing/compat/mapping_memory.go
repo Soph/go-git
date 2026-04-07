@@ -47,6 +47,12 @@ func (m *MemoryMapping) Add(native, compat plumbing.Hash) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if existing, ok := m.nativeToCompat[native]; ok {
+		delete(m.compatToNative, existing)
+	}
+	if existing, ok := m.compatToNative[compat]; ok {
+		delete(m.nativeToCompat, existing)
+	}
 	m.nativeToCompat[native] = compat
 	m.compatToNative[compat] = native
 	return nil

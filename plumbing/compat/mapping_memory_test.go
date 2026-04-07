@@ -67,5 +67,12 @@ func testHashMapping(t *testing.T, newMapping func() HashMapping) {
 		got, err := m.NativeToCompat(native1)
 		require.NoError(t, err)
 		assert.True(t, got.Equal(compat2))
+
+		_, err = m.CompatToNative(compat1)
+		assert.ErrorIs(t, err, plumbing.ErrObjectNotFound)
+
+		got, err = m.CompatToNative(compat2)
+		require.NoError(t, err)
+		assert.True(t, got.Equal(native1))
 	})
 }
