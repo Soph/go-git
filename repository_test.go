@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -912,6 +913,157 @@ func TestPushWithCompatObjectFormat(t *testing.T) {
 	}
 }
 
+func TestCompatCloneConcurrentObjectAccess(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name         string
+		serverTag     string
+		clientFormat  formatcfg.ObjectFormat
+		compatFormat  formatcfg.ObjectFormat
+	}{
+		{
+			name:         "sha1-client-from-sha256-server",
+			serverTag:    ".git-sha256",
+			clientFormat: formatcfg.SHA1,
+			compatFormat: formatcfg.SHA256,
+		},
+		{
+			name:         "sha256-client-from-sha1-server",
+			serverTag:    ".git",
+			clientFormat: formatcfg.SHA256,
+			compatFormat: formatcfg.SHA1,
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := fixtures.ByTag(tc.serverTag).One()
+			require.NotNil(t, f)
+
+			for _, srv := range server.All(server.Loader(t, f)) {
+				endpoint, err := srv.Start()
+				require.NoError(t, err)
+
+				t.Cleanup(func() {
+					require.NoError(t, srv.Close())
+				})
+
+				dir := t.TempDir()
+				st, wt := newCompatFilesystemStorage(t, dir, tc.clientFormat, tc.compatFormat)
+				r, err := Clone(st, wt, &CloneOptions{URL: endpoint, NoCheckout: true})
+				require.NoError(t, err)
+
+				head, err := r.Head()
+				require.NoError(t, err)
+
+				headHash := compatutil.NormalizeStorageHash(r.Storer, head.Hash())
+				commit, err := r.CommitObject(headHash)
+				require.NoError(t, err)
+
+				tr := requireCompatTranslator(t, r.Storer)
+				headCompatHash, err := tr.Mapping().NativeToCompat(headHash)
+				require.NoError(t, err)
+				treeCompatHash, err := tr.Mapping().NativeToCompat(commit.TreeHash)
+				require.NoError(t, err)
+
+				const (
+					workers    = 16
+					iterations = 200
+				)
+
+				errCh := make(chan error, workers)
+				var wg sync.WaitGroup
+				hasher := plumbing.FromObjectFormat(tc.clientFormat)
+				for worker := 0; worker < workers; worker++ {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						for i := 0; i < iterations; i++ {
+							commitObj, err := r.Storer.EncodedObject(plumbing.CommitObject, headHash)
+							if err != nil {
+								errCh <- err
+								return
+							}
+							commitContent, err := readTestObjectContent(commitObj)
+							if err != nil {
+								errCh <- err
+								return
+							}
+							computedHeadHash, err := hasher.Compute(plumbing.CommitObject, commitContent)
+							if err != nil {
+								errCh <- err
+								return
+							}
+							if !computedHeadHash.Equal(headHash) {
+								errCh <- fmt.Errorf("native commit content mismatch: got %s want %s", computedHeadHash, headHash)
+								return
+							}
+
+							compatCommitObj, err := r.Storer.EncodedObject(plumbing.CommitObject, headCompatHash)
+							if err != nil {
+								errCh <- err
+								return
+							}
+							compatCommitContent, err := readTestObjectContent(compatCommitObj)
+							if err != nil {
+								errCh <- err
+								return
+							}
+							if string(compatCommitContent) != string(commitContent) {
+								errCh <- fmt.Errorf("compat commit lookup returned different content")
+								return
+							}
+
+							treeObj, err := r.Storer.EncodedObject(plumbing.TreeObject, treeCompatHash)
+							if err != nil {
+								errCh <- err
+								return
+							}
+							treeContent, err := readTestObjectContent(treeObj)
+							if err != nil {
+								errCh <- err
+								return
+							}
+							computedTreeHash, err := hasher.Compute(plumbing.TreeObject, treeContent)
+							if err != nil {
+								errCh <- err
+								return
+							}
+							if !computedTreeHash.Equal(commit.TreeHash) {
+								errCh <- fmt.Errorf("tree content mismatch: got %s want %s", computedTreeHash, commit.TreeHash)
+								return
+							}
+							if err := r.Storer.HasEncodedObject(headCompatHash); err != nil {
+								errCh <- err
+								return
+							}
+							resolvedHead, err := r.Head()
+							if err != nil {
+								errCh <- err
+								return
+							}
+							if !compatutil.NormalizeStorageHash(r.Storer, resolvedHead.Hash()).Equal(headHash) {
+								errCh <- fmt.Errorf("head changed during concurrent access: got %s want %s", resolvedHead.Hash(), headHash)
+								return
+							}
+						}
+					}()
+				}
+
+				wg.Wait()
+				close(errCh)
+				for err := range errCh {
+					require.NoError(t, err)
+				}
+			}
+		})
+	}
+}
+
 func TestCompatPushStorerTranslatesTreeContent(t *testing.T) {
 	t.Parallel()
 
@@ -1146,6 +1298,16 @@ func requireCompatTranslator(t testing.TB, s storage.Storer) *compat.Translator 
 	require.True(t, ok)
 	require.NotNil(t, tp.Translator())
 	return tp.Translator()
+}
+
+func readTestObjectContent(obj plumbing.EncodedObject) ([]byte, error) {
+	reader, err := obj.Reader()
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+
+	return io.ReadAll(reader)
 }
 
 func firstRemoteTrackingRef(t testing.TB, r *Repository, remoteName string) *plumbing.Reference {

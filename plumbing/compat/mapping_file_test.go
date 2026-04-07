@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-git/go-billy/v6"
 	"github.com/go-git/go-billy/v6/memfs"
+	"github.com/go-git/go-billy/v6/osfs"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -212,6 +213,69 @@ func TestFileMappingConcurrentLookups(t *testing.T) {
 	for err := range errCh {
 		require.NoError(t, err)
 	}
+}
+
+func TestFileMappingConcurrentAddAndLookup(t *testing.T) {
+	fs := osfs.New(t.TempDir(), osfs.WithBoundOS())
+	require.NoError(t, fs.MkdirAll("objects", 0755))
+
+	m := NewFileMapping(fs, "objects")
+	type pair struct {
+		native plumbing.Hash
+		compat plumbing.Hash
+	}
+
+	const (
+		workers = 8
+		perWork = 64
+	)
+
+	errCh := make(chan error, workers)
+	var wg sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			for i := 0; i < perWork; i++ {
+				n := worker*perWork + i + 1
+				p := pair{
+					native: plumbing.NewHash(fmt.Sprintf("%040x", n)),
+					compat: plumbing.NewHash(fmt.Sprintf("%040x", n+workers*perWork)),
+				}
+				if err := m.Add(p.native, p.compat); err != nil {
+					errCh <- err
+					return
+				}
+
+				gotCompat, err := m.NativeToCompat(p.native)
+				if err != nil {
+					errCh <- err
+					return
+				}
+				if !gotCompat.Equal(p.compat) {
+					errCh <- fmt.Errorf("native lookup mismatch: got %s want %s", gotCompat, p.compat)
+					return
+				}
+
+				gotNative, err := m.CompatToNative(p.compat)
+				if err != nil {
+					errCh <- err
+					return
+				}
+				if !gotNative.Equal(p.native) {
+					errCh <- fmt.Errorf("compat lookup mismatch: got %s want %s", gotNative, p.native)
+					return
+				}
+			}
+		}(worker)
+	}
+
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		require.NoError(t, err)
+	}
+	assert.Equal(t, workers*perWork, m.Count())
 }
 
 type failingOpenFileFS struct {
