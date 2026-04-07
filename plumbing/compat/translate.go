@@ -487,13 +487,7 @@ func (t *Translator) translateMergeTagSection(out *bytes.Buffer, firstLine, rema
 	}
 
 	payload := bytes.Join(payloadLines, []byte("\n"))
-	var translated []byte
-	var err error
-	if reverse {
-		translated, err = t.rewriteTagContent(payload, true)
-	} else {
-		translated, err = t.rewriteTagContent(payload, false)
-	}
+	translated, err := t.rewriteTagContent(payload, reverse)
 	if err != nil {
 		return nil, fmt.Errorf("translate mergetag: %w", err)
 	}
