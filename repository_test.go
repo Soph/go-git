@@ -645,6 +645,85 @@ func TestCompatCloneThenLocalCommitMaintainsMappings(t *testing.T) {
 	}
 }
 
+func TestCloneWithCompatObjectFormatChecksOutWorktree(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		serverTag    string
+		clientFormat formatcfg.ObjectFormat
+		compatFormat formatcfg.ObjectFormat
+	}{
+		{
+			name:         "sha1 checkout from sha256 server",
+			serverTag:    ".git-sha256",
+			clientFormat: formatcfg.SHA1,
+			compatFormat: formatcfg.SHA256,
+		},
+		{
+			name:         "sha256 checkout from sha1 server",
+			serverTag:    ".git",
+			clientFormat: formatcfg.SHA256,
+			compatFormat: formatcfg.SHA1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := fixtures.ByTag(tc.serverTag).One()
+			require.NotNil(t, f, "fixture not found for tag %s", tc.serverTag)
+
+			for _, srv := range server.All(server.Loader(t, f)) {
+				endpoint, err := srv.Start()
+				require.NoError(t, err)
+
+				t.Cleanup(func() {
+					require.NoError(t, srv.Close())
+				})
+
+				dir := t.TempDir()
+				st, wt := newCompatFilesystemStorage(t, dir, tc.clientFormat, tc.compatFormat)
+
+				r, err := Clone(st, wt, &CloneOptions{URL: endpoint})
+				require.NoError(t, err)
+
+				head, err := r.Head()
+				require.NoError(t, err)
+				assert.Equal(t, tc.clientFormat.HexSize(), len(head.Hash().String()))
+
+				entries, err := os.ReadDir(dir)
+				require.NoError(t, err)
+				hasWorktreeContent := false
+				for _, entry := range entries {
+					if entry.Name() != GitDirName {
+						hasWorktreeContent = true
+						break
+					}
+				}
+				assert.True(t, hasWorktreeContent)
+
+				w, err := r.Worktree()
+				require.NoError(t, err)
+				status, err := w.Status()
+				require.NoError(t, err)
+				assert.True(t, status.IsClean())
+
+				headHash := normalizeObjectHash(r.Storer, head.Hash())
+				tr := requireCompatTranslator(t, r.Storer)
+				compatHash, err := tr.Mapping().NativeToCompat(headHash)
+				require.NoError(t, err)
+
+				reopened, err := PlainOpen(dir)
+				require.NoError(t, err)
+				_, err = reopened.Storer.EncodedObject(plumbing.CommitObject, compatHash)
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func requireCompatTranslator(t testing.TB, s storage.Storer) *compat.Translator {
 	t.Helper()
 
