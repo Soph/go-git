@@ -527,6 +527,74 @@ func TestFetchWithCompatObjectFormat(t *testing.T) {
 	}
 }
 
+func TestCompatFetchAfterReopenUpdatesMappings(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		sourceFormat formatcfg.ObjectFormat
+		clientFormat formatcfg.ObjectFormat
+		compatFormat formatcfg.ObjectFormat
+	}{
+		{
+			name:         "sha1 client fetches reopened sha256 source",
+			sourceFormat: formatcfg.SHA256,
+			clientFormat: formatcfg.SHA1,
+			compatFormat: formatcfg.SHA256,
+		},
+		{
+			name:         "sha256 client fetches reopened sha1 source",
+			sourceFormat: formatcfg.SHA1,
+			clientFormat: formatcfg.SHA256,
+			compatFormat: formatcfg.SHA1,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			sourceDir := t.TempDir()
+			sourceRepo, err := PlainInit(sourceDir, false, WithObjectFormat(tc.sourceFormat))
+			require.NoError(t, err)
+
+			firstCommit := createCommit(t, sourceRepo)
+			loader := &localRepositoryLoader{gitDir: filepath.Join(sourceDir, GitDirName)}
+
+			for _, srv := range server.All(loader) {
+				endpoint, err := srv.Start()
+				require.NoError(t, err)
+
+				t.Cleanup(func() {
+					require.NoError(t, srv.Close())
+				})
+
+				clientDir := t.TempDir()
+				clientSt, _ := newCompatFilesystemStorage(t, clientDir, tc.clientFormat, tc.compatFormat)
+				r, err := Init(clientSt)
+				require.NoError(t, err)
+
+				_, err = r.CreateRemote(&config.RemoteConfig{
+					Name: DefaultRemoteName,
+					URLs: []string{endpoint},
+				})
+				require.NoError(t, err)
+
+				require.NoError(t, r.Fetch(&FetchOptions{}))
+				assertCompatFetchState(t, r, firstCommit, tc.clientFormat, tc.compatFormat)
+
+				secondCommit := createCommit(t, sourceRepo)
+
+				reopened, err := PlainOpen(clientDir)
+				require.NoError(t, err)
+				require.NoError(t, reopened.Fetch(&FetchOptions{}))
+				assertCompatFetchState(t, reopened, secondCommit, tc.clientFormat, tc.compatFormat)
+			}
+		})
+	}
+}
+
 func TestCloneWithCompatObjectFormatOnFilesystem(t *testing.T) {
 	t.Parallel()
 
@@ -1215,6 +1283,14 @@ type taggedRepositorySource struct {
 	nestedTagHash    plumbing.Hash
 }
 
+type localRepositoryLoader struct {
+	gitDir string
+}
+
+func (l *localRepositoryLoader) Load(_ *transport.Endpoint) (storage.Storer, error) {
+	return filesystem.NewStorage(osfs.New(l.gitDir, osfs.WithBoundOS()), cache.NewObjectLRUDefault()), nil
+}
+
 func createTaggedRepositorySource(t *testing.T, sourceFormat formatcfg.ObjectFormat) taggedRepositorySource {
 	t.Helper()
 
@@ -1288,6 +1364,34 @@ func assertCompatTagState(
 	_, err = r.Storer.EncodedObject(plumbing.TagObject, source.annotatedTagHash)
 	require.NoError(t, err)
 	_, err = r.Storer.EncodedObject(plumbing.TagObject, source.nestedTagHash)
+	require.NoError(t, err)
+}
+
+func assertCompatFetchState(
+	t testing.TB,
+	r *Repository,
+	expectedCompatCommit plumbing.Hash,
+	clientFormat, compatFormat formatcfg.ObjectFormat,
+) {
+	t.Helper()
+
+	ref := firstRemoteTrackingRef(t, r, DefaultRemoteName)
+	assert.Equal(t, clientFormat.HexSize(), len(ref.Hash().String()))
+
+	headHash := compatutil.NormalizeStorageHash(r.Storer, ref.Hash())
+	assert.Equal(t, clientFormat.HexSize(), len(headHash.String()))
+
+	commit, err := r.CommitObject(headHash)
+	require.NoError(t, err)
+	assert.Equal(t, headHash, commit.Hash)
+
+	tr := requireCompatTranslator(t, r.Storer)
+	compatHash, err := tr.Mapping().NativeToCompat(headHash)
+	require.NoError(t, err)
+	assert.Equal(t, expectedCompatCommit, compatHash)
+	assert.Equal(t, compatFormat.HexSize(), len(compatHash.String()))
+
+	_, err = r.Storer.EncodedObject(plumbing.CommitObject, compatHash)
 	require.NoError(t, err)
 }
 
