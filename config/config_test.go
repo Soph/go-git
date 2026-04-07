@@ -810,8 +810,9 @@ func TestMerge(t *testing.T) {
 				}},
 				{
 					Extensions: struct {
-						ObjectFormat   config.ObjectFormat
-						WorktreeConfig bool
+						ObjectFormat       config.ObjectFormat
+						CompatObjectFormat config.ObjectFormat
+						WorktreeConfig     bool
 					}{
 						ObjectFormat:   config.SHA256,
 						WorktreeConfig: true,
@@ -824,8 +825,9 @@ func TestMerge(t *testing.T) {
 					Email: "bar@test",
 				},
 				Extensions: struct {
-					ObjectFormat   config.ObjectFormat
-					WorktreeConfig bool
+					ObjectFormat       config.ObjectFormat
+					CompatObjectFormat config.ObjectFormat
+					WorktreeConfig     bool
 				}{
 					ObjectFormat:   config.SHA256,
 					WorktreeConfig: true,

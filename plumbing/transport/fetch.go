@@ -4,12 +4,14 @@ import (
 	"context"
 	"io"
 
+	"github.com/go-git/go-git/v6/plumbing/compat"
 	"github.com/go-git/go-git/v6/plumbing/format/packfile"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp/capability"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp/sideband"
 	"github.com/go-git/go-git/v6/storage"
 	"github.com/go-git/go-git/v6/utils/ioutil"
+	xstorage "github.com/go-git/go-git/v6/x/storage"
 )
 
 // FetchPack fetches a packfile from the remote connection into the given
@@ -41,6 +43,16 @@ func FetchPack(
 
 	if err := packfile.UpdateObjectStorage(st, reader); err != nil {
 		return err
+	}
+
+	// If the storage supports compatObjectFormat, translate all fetched
+	// objects to populate the bidirectional hash mapping table.
+	if tp, ok := st.(xstorage.CompatTranslatorProvider); ok {
+		if t := tp.Translator(); t != nil {
+			if err := compat.TranslateStoredObjects(st, t); err != nil {
+				return err
+			}
+		}
 	}
 
 	if err := packf.Close(); err != nil {

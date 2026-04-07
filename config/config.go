@@ -163,6 +163,19 @@ type Config struct {
 		// This setting must not be changed after repository initialization
 		// (e.g. clone or init).
 		ObjectFormat format.ObjectFormat
+		// CompatObjectFormat specifies a secondary hash algorithm for
+		// backward compatibility. When set, a bidirectional mapping is
+		// maintained between the native ObjectFormat and this compat
+		// format, enabling interoperability with servers using the
+		// compat format.
+		//
+		// For example, a sha256 repository with compatObjectFormat=sha1
+		// can fetch from and push to sha1 servers.
+		//
+		// It is an error to specify this key unless
+		// core.repositoryFormatVersion is 1 and extensions.objectFormat
+		// is also set. The value must differ from objectFormat.
+		CompatObjectFormat format.ObjectFormat
 		// WorktreeConfig indicates that per-worktree config files are enabled.
 		// When true, each worktree may have a config.worktree file that
 		// overrides settings in the common .git/config.
@@ -452,6 +465,7 @@ const (
 	defaultBranchKey           = "defaultBranch"
 	repositoryFormatVersionKey = "repositoryformatversion"
 	objectFormatKey            = "objectformat"
+	compatObjectFormatKey      = "compatobjectformat"
 	worktreeConfigKey          = "worktreeConfig"
 	mirrorKey                  = "mirror"
 	versionKey                 = "version"
@@ -532,6 +546,7 @@ func (c *Config) unmarshalCore() {
 func (c *Config) unmarshalExtensions() {
 	s := c.Raw.Section(extensionsSection)
 	c.Extensions.ObjectFormat = format.ObjectFormat(s.Options.Get(objectFormatKey))
+	c.Extensions.CompatObjectFormat = format.ObjectFormat(s.Options.Get(compatObjectFormatKey))
 	c.Extensions.WorktreeConfig = strings.EqualFold(s.Options.Get(worktreeConfigKey), "true")
 }
 
@@ -768,6 +783,7 @@ func (c *Config) marshalExtensions() {
 	// Only marshal the [extensions] section if there are extension options to write.
 	// This avoids introducing an empty [extensions] section on round-trips.
 	if c.Extensions.ObjectFormat == format.UnsetObjectFormat &&
+		c.Extensions.CompatObjectFormat == format.UnsetObjectFormat &&
 		!c.Extensions.WorktreeConfig {
 		return
 	}
@@ -775,6 +791,10 @@ func (c *Config) marshalExtensions() {
 	s := c.Raw.Section(extensionsSection)
 	if c.Extensions.ObjectFormat != format.UnsetObjectFormat {
 		s.SetOption(objectFormatKey, string(c.Extensions.ObjectFormat))
+	}
+
+	if c.Extensions.CompatObjectFormat != format.UnsetObjectFormat {
+		s.SetOption(compatObjectFormatKey, string(c.Extensions.CompatObjectFormat))
 	}
 
 	if c.Extensions.WorktreeConfig {
