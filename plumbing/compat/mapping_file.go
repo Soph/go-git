@@ -70,16 +70,20 @@ func (m *FileMapping) NativeToCompat(native plumbing.Hash) (plumbing.Hash, error
 	}
 	m.mu.RUnlock()
 
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if h, ok := m.nativeToCompat.get(native); ok {
+		return h, nil
+	}
+
 	h, err := m.scanNativeToCompat(native)
 	if err != nil {
 		return plumbing.Hash{}, err
 	}
 
-	m.mu.Lock()
 	m.nativeToCompat.add(native, h)
 	m.compatToNative.add(h, native)
-	m.mu.Unlock()
-
 	return h, nil
 }
 
@@ -91,16 +95,20 @@ func (m *FileMapping) CompatToNative(compat plumbing.Hash) (plumbing.Hash, error
 	}
 	m.mu.RUnlock()
 
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if h, ok := m.compatToNative.get(compat); ok {
+		return h, nil
+	}
+
 	h, err := m.scanCompatToNative(compat)
 	if err != nil {
 		return plumbing.Hash{}, err
 	}
 
-	m.mu.Lock()
 	m.compatToNative.add(compat, h)
 	m.nativeToCompat.add(h, compat)
-	m.mu.Unlock()
-
 	return h, nil
 }
 
