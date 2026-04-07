@@ -84,6 +84,29 @@ func TestTranslateTree(t *testing.T) {
 	assert.False(t, treeObj.Hash().Equal(compatHash))
 }
 
+func TestReverseTranslateTree(t *testing.T) {
+	tr, _ := newTestTranslator()
+
+	blobContent := []byte("file content")
+	blobObj := makeEncodedObject(t, plumbing.BlobObject, blobContent, format.SHA1)
+	compatBlobHash, err := tr.TranslateObject(blobObj)
+	require.NoError(t, err)
+
+	var compatTreeContent []byte
+	compatTreeContent = append(compatTreeContent, []byte("100644 test.txt")...)
+	compatTreeContent = append(compatTreeContent, 0x00)
+	compatTreeContent = append(compatTreeContent, compatBlobHash.Bytes()...)
+
+	nativeTreeContent, err := tr.rewriteTreeContent(compatTreeContent, true)
+	require.NoError(t, err)
+
+	var expected []byte
+	expected = append(expected, []byte("100644 test.txt")...)
+	expected = append(expected, 0x00)
+	expected = append(expected, blobObj.Hash().Bytes()...)
+	assert.Equal(t, expected, nativeTreeContent)
+}
+
 func TestTranslateCommit(t *testing.T) {
 	tr, m := newTestTranslator()
 
@@ -157,6 +180,34 @@ func TestTranslateCommitWithParents(t *testing.T) {
 
 	// Verify the compat hash was computed and recorded.
 	assert.False(t, compatHash.IsZero())
+}
+
+func TestReverseTranslateCommit(t *testing.T) {
+	tr, _ := newTestTranslator()
+
+	blobObj := makeEncodedObject(t, plumbing.BlobObject, []byte("data"), format.SHA1)
+	_, err := tr.TranslateObject(blobObj)
+	require.NoError(t, err)
+
+	var treeContent []byte
+	treeContent = append(treeContent, []byte("100644 f.txt")...)
+	treeContent = append(treeContent, 0x00)
+	treeContent = append(treeContent, blobObj.Hash().Bytes()...)
+	treeObj := makeEncodedObject(t, plumbing.TreeObject, treeContent, format.SHA1)
+	_, err = tr.TranslateObject(treeObj)
+	require.NoError(t, err)
+
+	commitText := "tree " + treeObj.Hash().String() + "\n" +
+		"author A <a@b.c> 100 +0000\n" +
+		"committer A <a@b.c> 100 +0000\n" +
+		"\n" +
+		"root\n"
+	compatCommitText, err := tr.ReverseTranslateContent(plumbing.CommitObject, []byte(commitText))
+	require.NoError(t, err)
+
+	roundTrip, err := tr.reverseTranslateCommit(compatCommitText)
+	require.NoError(t, err)
+	assert.Equal(t, commitText, string(roundTrip))
 }
 
 func TestTranslateCommitWithMergeTag(t *testing.T) {
@@ -246,6 +297,26 @@ func TestTranslateTag(t *testing.T) {
 	got, err := m.NativeToCompat(tagObj.Hash())
 	require.NoError(t, err)
 	assert.True(t, got.Equal(compatHash))
+}
+
+func TestReverseTranslateTag(t *testing.T) {
+	tr, _ := newTestTranslator()
+
+	blobObj := makeEncodedObject(t, plumbing.BlobObject, []byte("tagged content"), format.SHA1)
+	compatBlobHash, err := tr.TranslateObject(blobObj)
+	require.NoError(t, err)
+
+	compatTagText := "object " + compatBlobHash.String() + "\n" +
+		"type blob\n" +
+		"tag v1.0\n" +
+		"tagger Test <t@t.com> 100 +0000\n" +
+		"\n" +
+		"Release v1.0\n"
+
+	nativeTagText, err := tr.reverseTranslateTag([]byte(compatTagText))
+	require.NoError(t, err)
+	assert.Contains(t, string(nativeTagText), "object "+blobObj.Hash().String())
+	assert.NotContains(t, string(nativeTagText), compatBlobHash.String())
 }
 
 func TestTranslateTagOfTag(t *testing.T) {
