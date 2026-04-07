@@ -11,6 +11,10 @@ import (
 	"github.com/go-git/go-git/v6/utils/trace"
 )
 
+type compatImportController interface {
+	BeginCompatObjectImport() func()
+}
+
 var signature = []byte{'P', 'A', 'C', 'K'}
 
 const (
@@ -32,6 +36,11 @@ func UpdateObjectStorage(s storer.Storer, packfile io.Reader) error {
 		defer func() {
 			trace.Performance.Printf("performance: %.9f s: update_obj_storage", time.Since(start).Seconds())
 		}()
+	}
+
+	if importer, ok := s.(compatImportController); ok {
+		done := importer.BeginCompatObjectImport()
+		defer done()
 	}
 
 	if pw, ok := s.(storer.PackfileWriter); ok {

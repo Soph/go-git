@@ -4,6 +4,7 @@ package filesystem
 import (
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/go-git/go-billy/v6"
 
@@ -13,7 +14,6 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/compat"
 	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
-	"github.com/go-git/go-git/v6/utils/trace"
 )
 
 // Storage is an implementation of git.Storer that stores data on disk in the
@@ -33,6 +33,7 @@ type Storage struct {
 	ReflogStorage
 
 	translator *compat.Translator
+	importing  int32
 }
 
 // Options holds configuration for the storage.
@@ -229,50 +230,30 @@ func (s *Storage) Translator() *compat.Translator {
 
 // HasEncodedObject returns nil if the object exists (by native or compat hash).
 func (s *Storage) HasEncodedObject(h plumbing.Hash) error {
-	err := s.ObjectStorage.HasEncodedObject(h)
-	if err == nil || s.translator == nil {
-		return err
-	}
-
-	native, cerr := s.translator.Mapping().CompatToNative(h)
-	if cerr != nil {
-		return err
-	}
-	return s.ObjectStorage.HasEncodedObject(native)
+	return compat.HasEncodedObject(&s.ObjectStorage, s.translator, h)
 }
 
 // EncodedObject returns the object by native or compat hash.
 func (s *Storage) EncodedObject(t plumbing.ObjectType, h plumbing.Hash) (plumbing.EncodedObject, error) {
-	obj, err := s.ObjectStorage.EncodedObject(t, h)
-	if err == nil || s.translator == nil {
-		return obj, err
-	}
-
-	native, cerr := s.translator.Mapping().CompatToNative(h)
-	if cerr != nil {
-		return nil, err
-	}
-	return s.ObjectStorage.EncodedObject(t, native)
+	return compat.EncodedObject(&s.ObjectStorage, s.translator, t, h)
 }
 
 // SetEncodedObject stores the object and, if compat is enabled,
 // computes and records its compat hash mapping.
 func (s *Storage) SetEncodedObject(obj plumbing.EncodedObject) (plumbing.Hash, error) {
-	h, err := s.ObjectStorage.SetEncodedObject(obj)
-	if err != nil {
-		return h, err
-	}
+	return compat.SetEncodedObject(&s.ObjectStorage, s.translator, obj, s.compatImporting())
+}
 
-	if s.translator != nil {
-		if _, terr := s.translator.TranslateObject(obj); terr != nil {
-			// Translation failure is non-fatal for now; the object is still
-			// stored. This can happen when dependencies haven't been
-			// translated yet (out-of-order insertion).
-			trace.General.Printf("storage/filesystem: failed to translate compat mapping for %s %s: %v", obj.Type(), h, terr)
-		}
+// BeginCompatObjectImport defers eager compat translation for batch pack imports.
+func (s *Storage) BeginCompatObjectImport() func() {
+	atomic.AddInt32(&s.importing, 1)
+	return func() {
+		atomic.AddInt32(&s.importing, -1)
 	}
+}
 
-	return h, nil
+func (s *Storage) compatImporting() bool {
+	return atomic.LoadInt32(&s.importing) > 0
 }
 
 // Filesystem returns the underlying filesystem

@@ -2,6 +2,7 @@ package compat
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 
@@ -9,6 +10,10 @@ import (
 	format "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/storer"
 )
+
+// ErrMissingDependencyMapping indicates that translation could not proceed
+// because a referenced object does not yet have a compat/native mapping.
+var ErrMissingDependencyMapping = errors.New("missing dependency mapping")
 
 // Translator converts objects between native and compat hash formats,
 // computing the compat-format hash and recording the mapping.
@@ -219,7 +224,7 @@ func (t *Translator) translateTreeContent(content []byte, reverse bool) ([]byte,
 
 		toHash, err := lookup(fromHash)
 		if err != nil {
-			return nil, fmt.Errorf("tree entry hash %s: no %s mapping: %w", fromHash, missingFormat, err)
+			return nil, fmt.Errorf("tree entry hash %s: no %s mapping: %w", fromHash, missingFormat, errors.Join(ErrMissingDependencyMapping, err))
 		}
 
 		out.Write(toHash.Bytes()[:toSize])
@@ -299,7 +304,7 @@ func (t *Translator) translateTextObject(content []byte, hashFields []string, re
 
 					toHash, err := lookup(fromHash)
 					if err != nil {
-						return nil, fmt.Errorf("%s hash %s: no %s mapping: %w", field, fromHash, missingFormat, err)
+						return nil, fmt.Errorf("%s hash %s: no %s mapping: %w", field, fromHash, missingFormat, errors.Join(ErrMissingDependencyMapping, err))
 					}
 
 					out.WriteString(prefix)

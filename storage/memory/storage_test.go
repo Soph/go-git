@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/compat"
 	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/format/reflog"
 	"github.com/go-git/go-git/v6/plumbing/storer"
@@ -256,4 +257,66 @@ func TestReflogStorage(t *testing.T) {
 	entries, err = s.Reflog(ref)
 	require.NoError(t, err)
 	assert.Empty(t, entries)
+}
+
+func TestSetEncodedObjectCompatTranslationFailureIsFatal(t *testing.T) {
+	t.Parallel()
+
+	sto := memory.NewStorage(
+		memory.WithObjectFormat(formatcfg.SHA256),
+		memory.WithCompatObjectFormat(formatcfg.SHA1),
+	)
+
+	obj := sto.NewEncodedObject()
+	obj.SetType(plumbing.CommitObject)
+	content := []byte(
+		"tree 1111111111111111111111111111111111111111111111111111111111111111\n" +
+			"author A <a@b.c> 100 +0000\n" +
+			"committer A <a@b.c> 100 +0000\n\nbroken\n",
+	)
+	obj.SetSize(int64(len(content)))
+	w, err := obj.Writer()
+	require.NoError(t, err)
+	_, err = w.Write(content)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	_, err = sto.SetEncodedObject(obj)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, compat.ErrMissingDependencyMapping)
+}
+
+func TestSetEncodedObjectCompatImportDefersTranslation(t *testing.T) {
+	t.Parallel()
+
+	sto := memory.NewStorage(
+		memory.WithObjectFormat(formatcfg.SHA256),
+		memory.WithCompatObjectFormat(formatcfg.SHA1),
+	)
+
+	obj := sto.NewEncodedObject()
+	obj.SetType(plumbing.CommitObject)
+	content := []byte(
+		"tree 1111111111111111111111111111111111111111111111111111111111111111\n" +
+			"author A <a@b.c> 100 +0000\n" +
+			"committer A <a@b.c> 100 +0000\n\nbroken\n",
+	)
+	obj.SetSize(int64(len(content)))
+	w, err := obj.Writer()
+	require.NoError(t, err)
+	_, err = w.Write(content)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	done := sto.BeginCompatObjectImport()
+	defer done()
+
+	h, err := sto.SetEncodedObject(obj)
+	require.NoError(t, err)
+	assert.False(t, h.IsZero())
+
+	tp, ok := any(sto).(xstorage.CompatTranslatorProvider)
+	require.True(t, ok)
+	_, err = tp.Translator().Mapping().NativeToCompat(h)
+	assert.ErrorIs(t, err, plumbing.ErrObjectNotFound)
 }
