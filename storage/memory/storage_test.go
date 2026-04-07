@@ -281,9 +281,18 @@ func TestSetEncodedObjectCompatTranslationFailureIsFatal(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, w.Close())
 
-	_, err = sto.SetEncodedObject(obj)
+	h, err := sto.SetEncodedObject(obj)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, compat.ErrMissingDependencyMapping)
+	assert.False(t, h.IsZero())
+
+	_, lookupErr := sto.ObjectStorage.EncodedObject(plumbing.CommitObject, h)
+	require.NoError(t, lookupErr)
+
+	tp, ok := any(sto).(xstorage.CompatTranslatorProvider)
+	require.True(t, ok)
+	_, lookupErr = tp.Translator().Mapping().NativeToCompat(h)
+	assert.ErrorIs(t, lookupErr, plumbing.ErrObjectNotFound)
 }
 
 func TestSetEncodedObjectCompatImportDefersTranslation(t *testing.T) {
@@ -319,4 +328,71 @@ func TestSetEncodedObjectCompatImportDefersTranslation(t *testing.T) {
 	require.True(t, ok)
 	_, err = tp.Translator().Mapping().NativeToCompat(h)
 	assert.ErrorIs(t, err, plumbing.ErrObjectNotFound)
+}
+
+func TestSetEncodedObjectCompatImportRequiresBackfill(t *testing.T) {
+	t.Parallel()
+
+	sto := memory.NewStorage(
+		memory.WithObjectFormat(formatcfg.SHA256),
+		memory.WithCompatObjectFormat(formatcfg.SHA1),
+	)
+
+	blob := sto.NewEncodedObject()
+	blob.SetType(plumbing.BlobObject)
+	blobContent := []byte("data")
+	blob.SetSize(int64(len(blobContent)))
+	w, err := blob.Writer()
+	require.NoError(t, err)
+	_, err = w.Write(blobContent)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	done := sto.BeginCompatObjectImport()
+	blobHash, err := sto.SetEncodedObject(blob)
+	require.NoError(t, err)
+
+	tree := sto.NewEncodedObject()
+	tree.SetType(plumbing.TreeObject)
+	var treeContent []byte
+	treeContent = append(treeContent, []byte("100644 f.txt")...)
+	treeContent = append(treeContent, 0x00)
+	treeContent = append(treeContent, blobHash.Bytes()...)
+	tree.SetSize(int64(len(treeContent)))
+	w, err = tree.Writer()
+	require.NoError(t, err)
+	_, err = w.Write(treeContent)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	treeHash, err := sto.SetEncodedObject(tree)
+	require.NoError(t, err)
+
+	obj := sto.NewEncodedObject()
+	obj.SetType(plumbing.CommitObject)
+	content := []byte(
+		"tree " + treeHash.String() + "\n" +
+			"author A <a@b.c> 100 +0000\n" +
+			"committer A <a@b.c> 100 +0000\n\nok\n",
+	)
+	obj.SetSize(int64(len(content)))
+	w, err = obj.Writer()
+	require.NoError(t, err)
+	_, err = w.Write(content)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	h, err := sto.SetEncodedObject(obj)
+	require.NoError(t, err)
+	done()
+
+	tp, ok := any(sto).(xstorage.CompatTranslatorProvider)
+	require.True(t, ok)
+	_, err = tp.Translator().Mapping().NativeToCompat(h)
+	assert.ErrorIs(t, err, plumbing.ErrObjectNotFound)
+
+	require.NoError(t, compat.TranslateStoredObjects(sto, tp.Translator()))
+
+	compatHash, err := tp.Translator().Mapping().NativeToCompat(h)
+	require.NoError(t, err)
+	assert.False(t, compatHash.IsZero())
 }

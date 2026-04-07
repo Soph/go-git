@@ -1,10 +1,6 @@
 package compat
 
-import (
-	"errors"
-
-	"github.com/go-git/go-git/v6/plumbing"
-)
+import "github.com/go-git/go-git/v6/plumbing"
 
 type encodedObjectSetter interface {
 	SetEncodedObject(plumbing.EncodedObject) (plumbing.Hash, error)
@@ -43,17 +39,23 @@ func EncodedObject(s encodedObjectLookup, t *Translator, ot plumbing.ObjectType,
 	return s.EncodedObject(ot, native)
 }
 
-// SetEncodedObject stores the object and eagerly records its compat mapping
-// unless compat translation is deferred for the current caller.
-func SetEncodedObject(s encodedObjectSetter, t *Translator, obj plumbing.EncodedObject, deferTranslation bool) (plumbing.Hash, error) {
+// SetEncodedObject stores the object and records its compat mapping.
+//
+// Normal writes are strict about signaling translation failures: if compat
+// mapping cannot be computed immediately, this returns that error to the caller
+// instead of silently suppressing it. The underlying object may already have
+// been persisted by the wrapped storage before the translation error occurs.
+//
+// Batch import paths may opt into deferred mapping creation by passing
+// deferMapping=true. In that mode the object is stored without attempting
+// translation, and the caller is responsible for completing the backfill later
+// via TranslateStoredObjects.
+func SetEncodedObject(s encodedObjectSetter, t *Translator, obj plumbing.EncodedObject, deferMapping bool) (plumbing.Hash, error) {
 	h, err := s.SetEncodedObject(obj)
-	if err != nil || t == nil || deferTranslation {
+	if err != nil || t == nil || deferMapping {
 		return h, err
 	}
 
 	_, err = t.TranslateObject(obj)
-	if err != nil && deferTranslation && errors.Is(err, ErrMissingDependencyMapping) {
-		return h, nil
-	}
 	return h, err
 }

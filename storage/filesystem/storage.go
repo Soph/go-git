@@ -244,7 +244,8 @@ func (s *Storage) SetEncodedObject(obj plumbing.EncodedObject) (plumbing.Hash, e
 	return compat.SetEncodedObject(&s.ObjectStorage, s.translator, obj, s.compatImporting())
 }
 
-// BeginCompatObjectImport defers eager compat translation for batch pack imports.
+// BeginCompatObjectImport defers eager compat mapping updates for batch pack
+// imports. Callers must backfill mappings after the batch import completes.
 func (s *Storage) BeginCompatObjectImport() func() {
 	atomic.AddInt32(&s.importing, 1)
 	return func() {

@@ -11,6 +11,9 @@ import (
 	"github.com/go-git/go-git/v6/utils/trace"
 )
 
+// compatImportController allows storers with compat mappings to suppress
+// eager per-object mapping updates during pack ingestion. The caller must
+// backfill mappings after the batch import completes.
 type compatImportController interface {
 	BeginCompatObjectImport() func()
 }

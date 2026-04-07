@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/cache"
+	"github.com/go-git/go-git/v6/plumbing/compat"
 	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/storer"
 	"github.com/go-git/go-git/v6/storage/filesystem"
@@ -398,4 +399,123 @@ func getExplicitSHA1(t testing.TB) billy.Filesystem {
 	require.NoError(t, err)
 
 	return fs
+}
+
+func TestSetEncodedObjectCompatTranslationFailureIsFatal(t *testing.T) {
+	t.Parallel()
+
+	fs := memfs.New()
+	sto := filesystem.NewStorage(fs, cache.NewObjectLRUDefault())
+	require.NoError(t, sto.Init())
+
+	cfg, err := sto.Config()
+	require.NoError(t, err)
+	cfg.Core.RepositoryFormatVersion = formatcfg.Version1
+	cfg.Extensions.ObjectFormat = formatcfg.SHA256
+	cfg.Extensions.CompatObjectFormat = formatcfg.SHA1
+	require.NoError(t, sto.SetConfig(cfg))
+
+	sto = filesystem.NewStorage(fs, cache.NewObjectLRUDefault())
+
+	obj := sto.NewEncodedObject()
+	obj.SetType(plumbing.CommitObject)
+	content := []byte(
+		"tree 1111111111111111111111111111111111111111111111111111111111111111\n" +
+			"author A <a@b.c> 100 +0000\n" +
+			"committer A <a@b.c> 100 +0000\n\nbroken\n",
+	)
+	obj.SetSize(int64(len(content)))
+	w, err := obj.Writer()
+	require.NoError(t, err)
+	_, err = w.Write(content)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	h, err := sto.SetEncodedObject(obj)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, compat.ErrMissingDependencyMapping)
+	assert.False(t, h.IsZero())
+
+	_, lookupErr := sto.ObjectStorage.EncodedObject(plumbing.CommitObject, h)
+	require.NoError(t, lookupErr)
+
+	tp, ok := any(sto).(xstorage.CompatTranslatorProvider)
+	require.True(t, ok)
+	_, lookupErr = tp.Translator().Mapping().NativeToCompat(h)
+	assert.ErrorIs(t, lookupErr, plumbing.ErrObjectNotFound)
+}
+
+func TestSetEncodedObjectCompatImportRequiresBackfill(t *testing.T) {
+	t.Parallel()
+
+	fs := memfs.New()
+	sto := filesystem.NewStorage(fs, cache.NewObjectLRUDefault())
+	require.NoError(t, sto.Init())
+
+	cfg, err := sto.Config()
+	require.NoError(t, err)
+	cfg.Core.RepositoryFormatVersion = formatcfg.Version1
+	cfg.Extensions.ObjectFormat = formatcfg.SHA256
+	cfg.Extensions.CompatObjectFormat = formatcfg.SHA1
+	require.NoError(t, sto.SetConfig(cfg))
+
+	sto = filesystem.NewStorage(fs, cache.NewObjectLRUDefault())
+
+	blob := sto.NewEncodedObject()
+	blob.SetType(plumbing.BlobObject)
+	blobContent := []byte("data")
+	blob.SetSize(int64(len(blobContent)))
+	w, err := blob.Writer()
+	require.NoError(t, err)
+	_, err = w.Write(blobContent)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	done := sto.BeginCompatObjectImport()
+	blobHash, err := sto.SetEncodedObject(blob)
+	require.NoError(t, err)
+
+	tree := sto.NewEncodedObject()
+	tree.SetType(plumbing.TreeObject)
+	var treeContent []byte
+	treeContent = append(treeContent, []byte("100644 f.txt")...)
+	treeContent = append(treeContent, 0x00)
+	treeContent = append(treeContent, blobHash.Bytes()...)
+	tree.SetSize(int64(len(treeContent)))
+	w, err = tree.Writer()
+	require.NoError(t, err)
+	_, err = w.Write(treeContent)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	treeHash, err := sto.SetEncodedObject(tree)
+	require.NoError(t, err)
+
+	commit := sto.NewEncodedObject()
+	commit.SetType(plumbing.CommitObject)
+	commitContent := []byte(
+		"tree " + treeHash.String() + "\n" +
+			"author A <a@b.c> 100 +0000\n" +
+			"committer A <a@b.c> 100 +0000\n\nok\n",
+	)
+	commit.SetSize(int64(len(commitContent)))
+	w, err = commit.Writer()
+	require.NoError(t, err)
+	_, err = w.Write(commitContent)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	commitHash, err := sto.SetEncodedObject(commit)
+	require.NoError(t, err)
+	done()
+
+	tp, ok := any(sto).(xstorage.CompatTranslatorProvider)
+	require.True(t, ok)
+	_, err = tp.Translator().Mapping().NativeToCompat(commitHash)
+	assert.ErrorIs(t, err, plumbing.ErrObjectNotFound)
+
+	require.NoError(t, compat.TranslateStoredObjects(sto, tp.Translator()))
+
+	compatHash, err := tp.Translator().Mapping().NativeToCompat(commitHash)
+	require.NoError(t, err)
+	assert.False(t, compatHash.IsZero())
 }
