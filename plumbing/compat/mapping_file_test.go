@@ -155,6 +155,31 @@ func TestFileMappingKeepsBoundedCache(t *testing.T) {
 	assert.Equal(t, fileMappingCacheSize*2, m.Count())
 }
 
+func TestMappingCachePromotesRecentAccess(t *testing.T) {
+	c := newMappingCache(2)
+	key1 := plumbing.NewHash("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	val1 := plumbing.NewHash("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	key2 := plumbing.NewHash("cccccccccccccccccccccccccccccccccccccccc")
+	val2 := plumbing.NewHash("dddddddddddddddddddddddddddddddddddddddd")
+	key3 := plumbing.NewHash("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+	val3 := plumbing.NewHash("ffffffffffffffffffffffffffffffffffffffff")
+
+	c.add(key1, val1)
+	c.add(key2, val2)
+
+	got, ok := c.get(key1)
+	require.True(t, ok)
+	assert.True(t, got.Equal(val1))
+
+	c.add(key3, val3)
+
+	_, ok = c.get(key2)
+	assert.False(t, ok)
+	got, ok = c.get(key1)
+	require.True(t, ok)
+	assert.True(t, got.Equal(val1))
+}
+
 func TestFileMappingSkipsMalformedLines(t *testing.T) {
 	fs := memfs.New()
 	_ = fs.MkdirAll("objects", 0755)

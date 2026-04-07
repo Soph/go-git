@@ -322,6 +322,7 @@ func (c *mappingCache) get(key plumbing.Hash) (plumbing.Hash, bool) {
 	if !ok {
 		return plumbing.Hash{}, false
 	}
+	c.order.MoveToBack(elem)
 	return elem.Value.(*mappingCacheEntry).value, true
 }
 
