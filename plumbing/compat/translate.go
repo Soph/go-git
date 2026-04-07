@@ -50,6 +50,17 @@ func (t *Translator) Mapping() HashMapping {
 //
 // For blobs, content is identical across formats; only the hash differs.
 func (t *Translator) TranslateObject(obj plumbing.EncodedObject) (plumbing.Hash, error) {
+	if obj.Type() == plumbing.BlobObject {
+		compatHash, err := t.computeBlobCompatHash(obj)
+		if err != nil {
+			return plumbing.Hash{}, err
+		}
+		if err := t.mapping.Add(obj.Hash(), compatHash); err != nil {
+			return plumbing.Hash{}, fmt.Errorf("record mapping: %w", err)
+		}
+		return compatHash, nil
+	}
+
 	content, err := readObjectContent(obj)
 	if err != nil {
 		return plumbing.Hash{}, err
@@ -69,6 +80,20 @@ func (t *Translator) TranslateObject(obj plumbing.EncodedObject) (plumbing.Hash,
 		return plumbing.Hash{}, fmt.Errorf("record mapping: %w", err)
 	}
 
+	return compatHash, nil
+}
+
+func (t *Translator) computeBlobCompatHash(obj plumbing.EncodedObject) (plumbing.Hash, error) {
+	reader, err := obj.Reader()
+	if err != nil {
+		return plumbing.Hash{}, fmt.Errorf("read object: %w", err)
+	}
+	defer reader.Close()
+
+	compatHash, err := t.compatHasher.ComputeReader(obj.Type(), obj.Size(), reader)
+	if err != nil {
+		return plumbing.Hash{}, fmt.Errorf("compute compat hash: %w", err)
+	}
 	return compatHash, nil
 }
 

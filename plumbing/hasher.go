@@ -4,6 +4,7 @@ import (
 	"crypto"
 	"fmt"
 	"hash"
+	"io"
 	"strconv"
 	"sync"
 
@@ -40,6 +41,25 @@ func (h *ObjectHasher) Compute(ot ObjectType, d []byte) (ObjectID, error) {
 	out := ObjectID{format: h.format}
 	writeHeader(h.hasher, ot, int64(len(d)))
 	_, err := h.hasher.Write(d)
+	if err != nil {
+		h.m.Unlock()
+		return out, fmt.Errorf("failed to compute hash: %w", err)
+	}
+
+	copy(out.hash[:], h.hasher.Sum(out.hash[:0]))
+	h.m.Unlock()
+	return out, nil
+}
+
+// ComputeReader computes the hash of the given object content by streaming it
+// from r using the provided object type and size.
+func (h *ObjectHasher) ComputeReader(ot ObjectType, sz int64, r io.Reader) (ObjectID, error) {
+	h.m.Lock()
+	h.hasher.Reset()
+
+	out := ObjectID{format: h.format}
+	writeHeader(h.hasher, ot, sz)
+	_, err := io.Copy(h.hasher, r)
 	if err != nil {
 		h.m.Unlock()
 		return out, fmt.Errorf("failed to compute hash: %w", err)
