@@ -1208,7 +1208,7 @@ func (r *Remote) updateLocalReferenceStorage(
 				localName = plumbing.NewBranchReferenceName(localName.String())
 			}
 			old, _ := storer.ResolveReference(r.s, localName)
-			newRef := plumbing.NewHashReference(localName, ref.Hash())
+			newRef := plumbing.NewHashReference(localName, normalizeObjectHash(r.s, ref.Hash()))
 
 			// If the ref exists locally as a non-tag and force is not
 			// specified, only update if the new ref is an ancestor of the old
@@ -1264,6 +1264,7 @@ func (r *Remote) buildFetchedTags(refs memory.ReferenceStorage) (updated bool, e
 		if !ref.Name().IsTag() {
 			continue
 		}
+		ref = normalizeReferenceHash(r.s, ref)
 
 		_, err := r.s.EncodedObject(plumbing.AnyObject, ref.Hash())
 		if errors.Is(err, plumbing.ErrObjectNotFound) {

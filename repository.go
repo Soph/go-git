@@ -32,6 +32,7 @@ import (
 	"github.com/go-git/go-git/v6/utils/ioutil"
 	"github.com/go-git/go-git/v6/utils/trace"
 	"github.com/go-git/go-git/v6/x/plugin"
+	xstorage "github.com/go-git/go-git/v6/x/storage"
 )
 
 // GitDirName this is a special folder where all the git stuff is.
@@ -631,6 +632,28 @@ func newRepository(s storage.Storer, worktree billy.Filesystem) *Repository {
 		wt:     worktree,
 		r:      make(map[string]*Remote),
 	}
+}
+
+func normalizeObjectHash(s storage.Storer, h plumbing.Hash) plumbing.Hash {
+	tp, ok := s.(xstorage.CompatTranslatorProvider)
+	if !ok || tp.Translator() == nil {
+		return h
+	}
+
+	native, err := tp.Translator().Mapping().CompatToNative(h)
+	if err != nil {
+		return h
+	}
+
+	return native
+}
+
+func normalizeReferenceHash(s storage.Storer, ref *plumbing.Reference) *plumbing.Reference {
+	if ref == nil || ref.Type() != plumbing.HashReference {
+		return ref
+	}
+
+	return plumbing.NewHashReference(ref.Name(), normalizeObjectHash(s, ref.Hash()))
 }
 
 func checkTargetDirIsEmpty(path string) (empty bool, err error) {
@@ -1277,6 +1300,7 @@ func (r *Repository) fetchAndUpdateReferences(
 	if err != nil {
 		return nil, err
 	}
+	resolvedRef = normalizeReferenceHash(r.Storer, resolvedRef)
 
 	refsUpdated, err := r.updateReferences(remote.c.Fetch, resolvedRef)
 	if err != nil {
@@ -1343,7 +1367,7 @@ func (r *Repository) calculateRemoteHeadReference(spec []config.RefSpec,
 		name = rs.Dst(name)
 		_, err := r.Storer.Reference(name)
 		if err == plumbing.ErrReferenceNotFound {
-			refs = append(refs, plumbing.NewHashReference(name, resolvedHead.Hash()))
+			refs = append(refs, plumbing.NewHashReference(name, normalizeObjectHash(r.Storer, resolvedHead.Hash())))
 		}
 	}
 

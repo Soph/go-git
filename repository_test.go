@@ -30,6 +30,7 @@ import (
 	"github.com/go-git/go-git/v6/internal/server"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/cache"
+	"github.com/go-git/go-git/v6/plumbing/compat"
 	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
@@ -446,6 +447,261 @@ func TestFetchMustNotUpdateObjectFormat(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFetchWithCompatObjectFormat(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		serverTag    string
+		clientFormat formatcfg.ObjectFormat
+		compatFormat formatcfg.ObjectFormat
+	}{
+		{
+			name:         "sha1 client fetches sha256 server",
+			serverTag:    ".git-sha256",
+			clientFormat: formatcfg.SHA1,
+			compatFormat: formatcfg.SHA256,
+		},
+		{
+			name:         "sha256 client fetches sha1 server",
+			serverTag:    ".git",
+			clientFormat: formatcfg.SHA256,
+			compatFormat: formatcfg.SHA1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := fixtures.ByTag(tc.serverTag).One()
+			require.NotNil(t, f, "fixture not found for tag %s", tc.serverTag)
+
+			for _, srv := range server.All(server.Loader(t, f)) {
+				endpoint, err := srv.Start()
+				require.NoError(t, err)
+
+				t.Cleanup(func() {
+					require.NoError(t, srv.Close())
+				})
+
+				st := memory.NewStorage(
+					memory.WithObjectFormat(tc.clientFormat),
+					memory.WithCompatObjectFormat(tc.compatFormat),
+				)
+
+				r, err := Init(st)
+				require.NoError(t, err)
+
+				_, err = r.CreateRemote(&config.RemoteConfig{
+					Name: DefaultRemoteName,
+					URLs: []string{endpoint},
+				})
+				require.NoError(t, err)
+
+				err = r.Fetch(&FetchOptions{})
+				require.NoError(t, err)
+
+				ref := firstRemoteTrackingRef(t, r, DefaultRemoteName)
+				assert.Equal(t, tc.clientFormat.HexSize(), len(ref.Hash().String()))
+
+				headHash := normalizeObjectHash(r.Storer, ref.Hash())
+				assert.Equal(t, tc.clientFormat.HexSize(), len(headHash.String()))
+
+				_, err = r.CommitObject(headHash)
+				require.NoError(t, err)
+
+				tr := requireCompatTranslator(t, r.Storer)
+				compatHash, err := tr.Mapping().NativeToCompat(headHash)
+				require.NoError(t, err)
+				assert.Equal(t, tc.compatFormat.HexSize(), len(compatHash.String()))
+
+				_, err = r.Storer.EncodedObject(plumbing.CommitObject, compatHash)
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestCloneWithCompatObjectFormatOnFilesystem(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		serverTag    string
+		clientFormat formatcfg.ObjectFormat
+		compatFormat formatcfg.ObjectFormat
+	}{
+		{
+			name:         "sha1 clone from sha256 server",
+			serverTag:    ".git-sha256",
+			clientFormat: formatcfg.SHA1,
+			compatFormat: formatcfg.SHA256,
+		},
+		{
+			name:         "sha256 clone from sha1 server",
+			serverTag:    ".git",
+			clientFormat: formatcfg.SHA256,
+			compatFormat: formatcfg.SHA1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := fixtures.ByTag(tc.serverTag).One()
+			require.NotNil(t, f, "fixture not found for tag %s", tc.serverTag)
+
+			for _, srv := range server.All(server.Loader(t, f)) {
+				endpoint, err := srv.Start()
+				require.NoError(t, err)
+
+				t.Cleanup(func() {
+					require.NoError(t, srv.Close())
+				})
+
+				dir := t.TempDir()
+				st, wt := newCompatFilesystemStorage(t, dir, tc.clientFormat, tc.compatFormat)
+
+				r, err := Clone(st, wt, &CloneOptions{
+					URL:        endpoint,
+					NoCheckout: true,
+				})
+				require.NoError(t, err)
+
+				head, err := r.Head()
+				require.NoError(t, err)
+				assert.Equal(t, tc.clientFormat.HexSize(), len(head.Hash().String()))
+
+				headHash := normalizeObjectHash(r.Storer, head.Hash())
+				assert.Equal(t, tc.clientFormat.HexSize(), len(headHash.String()))
+
+				_, err = r.CommitObject(headHash)
+				require.NoError(t, err)
+
+				tr := requireCompatTranslator(t, r.Storer)
+				compatHash, err := tr.Mapping().NativeToCompat(headHash)
+				require.NoError(t, err)
+				assert.Equal(t, tc.compatFormat.HexSize(), len(compatHash.String()))
+
+				reopened, err := PlainOpen(dir)
+				require.NoError(t, err)
+
+				reopenedHead, err := reopened.Head()
+				require.NoError(t, err)
+				assert.Equal(t, tc.clientFormat.HexSize(), len(reopenedHead.Hash().String()))
+
+				_, err = reopened.Storer.EncodedObject(plumbing.CommitObject, compatHash)
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestCompatCloneThenLocalCommitMaintainsMappings(t *testing.T) {
+	t.Parallel()
+
+	f := fixtures.ByTag(".git-sha256").One()
+	require.NotNil(t, f, "fixture not found for tag .git-sha256")
+
+	for _, srv := range server.All(server.Loader(t, f)) {
+		endpoint, err := srv.Start()
+		require.NoError(t, err)
+
+		t.Cleanup(func() {
+			require.NoError(t, srv.Close())
+		})
+
+		dir := t.TempDir()
+		st, wt := newCompatFilesystemStorage(t, dir, formatcfg.SHA1, formatcfg.SHA256)
+
+		r, err := Clone(st, wt, &CloneOptions{URL: endpoint})
+		require.NoError(t, err)
+
+		head, err := r.Head()
+		require.NoError(t, err)
+		oldHeadNative := normalizeObjectHash(r.Storer, head.Hash())
+
+		newCommitHash := createCommit(t, r)
+		assert.Equal(t, formatcfg.SHA1.HexSize(), len(newCommitHash.String()))
+
+		tr := requireCompatTranslator(t, r.Storer)
+		compatHash, err := tr.Mapping().NativeToCompat(newCommitHash)
+		require.NoError(t, err)
+		assert.Equal(t, formatcfg.SHA256.HexSize(), len(compatHash.String()))
+
+		commit, err := r.CommitObject(newCommitHash)
+		require.NoError(t, err)
+		require.Len(t, commit.ParentHashes, 1)
+		assert.Equal(t, oldHeadNative, commit.ParentHashes[0])
+
+		reopened, err := PlainOpen(dir)
+		require.NoError(t, err)
+		_, err = reopened.Storer.EncodedObject(plumbing.CommitObject, compatHash)
+		require.NoError(t, err)
+	}
+}
+
+func requireCompatTranslator(t testing.TB, s storage.Storer) *compat.Translator {
+	t.Helper()
+
+	tp, ok := s.(xstorage.CompatTranslatorProvider)
+	require.True(t, ok)
+	require.NotNil(t, tp.Translator())
+	return tp.Translator()
+}
+
+func firstRemoteTrackingRef(t testing.TB, r *Repository, remoteName string) *plumbing.Reference {
+	t.Helper()
+
+	iter, err := r.References()
+	require.NoError(t, err)
+
+	var result *plumbing.Reference
+	err = iter.ForEach(func(ref *plumbing.Reference) error {
+		if ref.Type() != plumbing.HashReference {
+			return nil
+		}
+
+		prefix := "refs/remotes/" + remoteName + "/"
+		if strings.HasPrefix(ref.Name().String(), prefix) && ref.Name() != plumbing.ReferenceName(prefix+"HEAD") {
+			result = ref
+			return storer.ErrStop
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	return result
+}
+
+func newCompatFilesystemStorage(
+	t testing.TB,
+	dir string,
+	native, compat formatcfg.ObjectFormat,
+) (*filesystem.Storage, billy.Filesystem) {
+	t.Helper()
+
+	gitDir := filepath.Join(dir, GitDirName)
+	require.NoError(t, os.MkdirAll(gitDir, 0o755))
+
+	cfg := config.NewConfig()
+	cfg.Core.RepositoryFormatVersion = formatcfg.Version1
+	cfg.Extensions.ObjectFormat = native
+	cfg.Extensions.CompatObjectFormat = compat
+	data, err := cfg.Marshal()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(gitDir, "config"), data, 0o644))
+
+	wt := osfs.New(dir, osfs.WithBoundOS())
+	dot, err := wt.Chroot(GitDirName)
+	require.NoError(t, err)
+
+	return filesystem.NewStorage(dot, cache.NewObjectLRUDefault()), wt
 }
 
 // TestFetchByHashThenResolveRevision is a regression test for two bugs that
