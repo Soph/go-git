@@ -13,6 +13,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/compat"
 	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
+	"github.com/go-git/go-git/v6/utils/trace"
 )
 
 // Storage is an implementation of git.Storer that stores data on disk in the
@@ -152,7 +153,7 @@ func NewStorageWithOptions(fs billy.Filesystem, c cache.Object, ops Options) *St
 	return s
 }
 
-// SetObjectFormat sets the ObjectFormat for the storage, initiatising
+// SetObjectFormat sets the ObjectFormat for the storage, initialising
 // hashers and object hashers accordingly. This must only be called
 // during the first pack negotiation of a repository clone operation.
 //
@@ -267,7 +268,7 @@ func (s *Storage) SetEncodedObject(obj plumbing.EncodedObject) (plumbing.Hash, e
 			// Translation failure is non-fatal for now; the object is still
 			// stored. This can happen when dependencies haven't been
 			// translated yet (out-of-order insertion).
-			_ = terr
+			trace.General.Printf("storage/filesystem: failed to translate compat mapping for %s %s: %v", obj.Type(), h, terr)
 		}
 	}
 

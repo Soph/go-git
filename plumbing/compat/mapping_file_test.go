@@ -1,8 +1,11 @@
 package compat
 
 import (
+	"errors"
+	"os"
 	"testing"
 
+	"github.com/go-git/go-billy/v6"
 	"github.com/go-git/go-billy/v6/memfs"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/stretchr/testify/assert"
@@ -41,4 +44,38 @@ func TestFileMappingEmptyFile(t *testing.T) {
 
 	m := NewFileMapping(fs, "objects")
 	assert.Equal(t, 0, m.Count())
+}
+
+func TestFileMappingAddDoesNotUpdateMemoryOnWriteFailure(t *testing.T) {
+	fs := &failingOpenFileFS{
+		Filesystem: memfs.New(),
+		failPath:   "objects/" + looseObjectIdxFile,
+		err:        errors.New("append failed"),
+	}
+	_ = fs.MkdirAll("objects", 0755)
+
+	native := plumbing.NewHash("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	compat := plumbing.NewHash("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+
+	m := NewFileMapping(fs, "objects")
+	err := m.Add(native, compat)
+	require.Error(t, err)
+
+	_, err = m.NativeToCompat(native)
+	assert.ErrorIs(t, err, plumbing.ErrObjectNotFound)
+	assert.Equal(t, 0, m.Count())
+}
+
+type failingOpenFileFS struct {
+	billy.Filesystem
+	failPath string
+	err      error
+}
+
+func (fs *failingOpenFileFS) OpenFile(filename string, flag int, perm os.FileMode) (billy.File, error) {
+	if filename == fs.failPath && flag&(os.O_APPEND|os.O_WRONLY) == (os.O_APPEND|os.O_WRONLY) {
+		return nil, fs.err
+	}
+
+	return fs.Filesystem.OpenFile(filename, flag, perm)
 }

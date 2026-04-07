@@ -183,6 +183,38 @@ func TestTranslateTag(t *testing.T) {
 	assert.True(t, got.Equal(compatHash))
 }
 
+func TestTranslateTagOfTag(t *testing.T) {
+	tr, m := newTestTranslator()
+
+	blobObj := makeEncodedObject(t, plumbing.BlobObject, []byte("tagged content"), format.SHA1)
+	_, err := tr.TranslateObject(blobObj)
+	require.NoError(t, err)
+
+	tag1Text := "object " + blobObj.Hash().String() + "\n" +
+		"type blob\n" +
+		"tag v1.0\n" +
+		"tagger Test <t@t.com> 100 +0000\n" +
+		"\n" +
+		"Release v1.0\n"
+	tag1Obj := makeEncodedObject(t, plumbing.TagObject, []byte(tag1Text), format.SHA1)
+	_, err = tr.TranslateObject(tag1Obj)
+	require.NoError(t, err)
+
+	tag2Text := "object " + tag1Obj.Hash().String() + "\n" +
+		"type tag\n" +
+		"tag latest\n" +
+		"tagger Test <t@t.com> 200 +0000\n" +
+		"\n" +
+		"Nested tag\n"
+	tag2Obj := makeEncodedObject(t, plumbing.TagObject, []byte(tag2Text), format.SHA1)
+	compatHash, err := tr.TranslateObject(tag2Obj)
+	require.NoError(t, err)
+
+	got, err := m.NativeToCompat(tag2Obj.Hash())
+	require.NoError(t, err)
+	assert.True(t, got.Equal(compatHash))
+}
+
 func TestTranslateTreeMissingMapping(t *testing.T) {
 	tr, _ := newTestTranslator()
 

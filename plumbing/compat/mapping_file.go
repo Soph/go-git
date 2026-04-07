@@ -91,14 +91,11 @@ func (m *FileMapping) load() error {
 
 func (m *FileMapping) NativeToCompat(native plumbing.Hash) (plumbing.Hash, error) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if err := m.load(); err != nil {
-		m.mu.Unlock()
 		return plumbing.Hash{}, err
 	}
-	m.mu.Unlock()
-
-	m.mu.RLock()
-	defer m.mu.RUnlock()
 
 	h, ok := m.nativeToCompat[native]
 	if !ok {
@@ -109,14 +106,11 @@ func (m *FileMapping) NativeToCompat(native plumbing.Hash) (plumbing.Hash, error
 
 func (m *FileMapping) CompatToNative(compat plumbing.Hash) (plumbing.Hash, error) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if err := m.load(); err != nil {
-		m.mu.Unlock()
 		return plumbing.Hash{}, err
 	}
-	m.mu.Unlock()
-
-	m.mu.RLock()
-	defer m.mu.RUnlock()
 
 	h, ok := m.compatToNative[compat]
 	if !ok {
@@ -133,10 +127,6 @@ func (m *FileMapping) Add(native, compat plumbing.Hash) error {
 		return err
 	}
 
-	// Update in-memory maps first.
-	m.nativeToCompat[native] = compat
-	m.compatToNative[compat] = native
-
 	// Append to the file. Use O_CREATE|O_APPEND for atomic appends.
 	f, err := m.fs.OpenFile(m.idxPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
@@ -149,16 +139,16 @@ func (m *FileMapping) Add(native, compat plumbing.Hash) error {
 		return fmt.Errorf("write to loose-object-idx: %w", err)
 	}
 
+	m.nativeToCompat[native] = compat
+	m.compatToNative[compat] = native
+
 	return nil
 }
 
 func (m *FileMapping) Count() int {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	_ = m.load()
-	m.mu.Unlock()
-
-	m.mu.RLock()
-	defer m.mu.RUnlock()
 
 	return len(m.nativeToCompat)
 }

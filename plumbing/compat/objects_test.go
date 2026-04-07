@@ -101,6 +101,57 @@ func TestTranslateStoredObjectsEmpty(t *testing.T) {
 	assert.Equal(t, 0, m.Count())
 }
 
+func TestTranslateStoredObjectsTagOfTag(t *testing.T) {
+	s := memory.NewStorage(memory.WithObjectFormat(format.SHA1))
+	oh := plumbing.FromObjectFormat(format.SHA1)
+
+	blobContent := []byte("hello world\n")
+	blob := plumbing.NewMemoryObject(oh)
+	blob.SetType(plumbing.BlobObject)
+	blob.Write(blobContent)
+	blob.SetSize(int64(len(blobContent)))
+	blobHash, err := s.ObjectStorage.SetEncodedObject(blob)
+	require.NoError(t, err)
+
+	tag1Text := "object " + blobHash.String() + "\n" +
+		"type blob\n" +
+		"tag v1.0\n" +
+		"tagger Test <t@t.com> 100 +0000\n" +
+		"\n" +
+		"release\n"
+	tag1 := plumbing.NewMemoryObject(oh)
+	tag1.SetType(plumbing.TagObject)
+	tag1.Write([]byte(tag1Text))
+	tag1.SetSize(int64(len(tag1Text)))
+	tag1Hash, err := s.ObjectStorage.SetEncodedObject(tag1)
+	require.NoError(t, err)
+
+	tag2Text := "object " + tag1Hash.String() + "\n" +
+		"type tag\n" +
+		"tag latest\n" +
+		"tagger Test <t@t.com> 200 +0000\n" +
+		"\n" +
+		"nested release\n"
+	tag2 := plumbing.NewMemoryObject(oh)
+	tag2.SetType(plumbing.TagObject)
+	tag2.Write([]byte(tag2Text))
+	tag2.SetSize(int64(len(tag2Text)))
+	tag2Hash, err := s.ObjectStorage.SetEncodedObject(tag2)
+	require.NoError(t, err)
+
+	m := compat.NewMemoryMapping()
+	tr := compat.NewTranslator(compat.Formats{
+		Native: format.SHA1,
+		Compat: format.SHA256,
+	}, m)
+
+	err = compat.TranslateStoredObjects(s, tr)
+	require.NoError(t, err)
+
+	_, err = m.NativeToCompat(tag2Hash)
+	require.NoError(t, err)
+}
+
 func TestImportStoredObjects(t *testing.T) {
 	src := memory.NewStorage(memory.WithObjectFormat(format.SHA1))
 	dst := memory.NewStorage(
@@ -172,4 +223,71 @@ func TestImportStoredObjects(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(content), "tree "+nativeTreeHash.String())
 	assert.NotContains(t, string(content), "tree "+treeHash.String())
+}
+
+func TestImportStoredObjectsTagOfTag(t *testing.T) {
+	src := memory.NewStorage(memory.WithObjectFormat(format.SHA1))
+	dst := memory.NewStorage(
+		memory.WithObjectFormat(format.SHA256),
+		memory.WithCompatObjectFormat(format.SHA1),
+	)
+
+	oh := plumbing.FromObjectFormat(format.SHA1)
+
+	blobContent := []byte("hello world\n")
+	blob := plumbing.NewMemoryObject(oh)
+	blob.SetType(plumbing.BlobObject)
+	blob.Write(blobContent)
+	blob.SetSize(int64(len(blobContent)))
+	blobHash, err := src.SetEncodedObject(blob)
+	require.NoError(t, err)
+
+	tag1Text := "object " + blobHash.String() + "\n" +
+		"type blob\n" +
+		"tag v1.0\n" +
+		"tagger Test <t@t.com> 100 +0000\n" +
+		"\n" +
+		"release\n"
+	tag1 := plumbing.NewMemoryObject(oh)
+	tag1.SetType(plumbing.TagObject)
+	tag1.Write([]byte(tag1Text))
+	tag1.SetSize(int64(len(tag1Text)))
+	tag1Hash, err := src.SetEncodedObject(tag1)
+	require.NoError(t, err)
+
+	tag2Text := "object " + tag1Hash.String() + "\n" +
+		"type tag\n" +
+		"tag latest\n" +
+		"tagger Test <t@t.com> 200 +0000\n" +
+		"\n" +
+		"nested release\n"
+	tag2 := plumbing.NewMemoryObject(oh)
+	tag2.SetType(plumbing.TagObject)
+	tag2.Write([]byte(tag2Text))
+	tag2.SetSize(int64(len(tag2Text)))
+	tag2Hash, err := src.SetEncodedObject(tag2)
+	require.NoError(t, err)
+
+	tr := dst.Translator()
+	require.NotNil(t, tr)
+
+	err = compat.ImportStoredObjects(src, dst, tr)
+	require.NoError(t, err)
+
+	nativeTag2Hash, err := tr.Mapping().CompatToNative(tag2Hash)
+	require.NoError(t, err)
+	assert.False(t, nativeTag2Hash.IsZero())
+
+	obj, err := dst.ObjectStorage.EncodedObject(plumbing.TagObject, nativeTag2Hash)
+	require.NoError(t, err)
+	r, err := obj.Reader()
+	require.NoError(t, err)
+	defer r.Close()
+
+	content, err := io.ReadAll(r)
+	require.NoError(t, err)
+
+	nativeTag1Hash, err := tr.Mapping().CompatToNative(tag1Hash)
+	require.NoError(t, err)
+	assert.Contains(t, string(content), "object "+nativeTag1Hash.String())
 }

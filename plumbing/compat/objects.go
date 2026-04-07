@@ -33,7 +33,7 @@ func TranslateStoredObjects(s storer.EncodedObjectStorer, t *Translator) error {
 	}
 
 	// Phase 4: Translate tags (depend on any object type).
-	if err := translateObjectsOfType(s, t, plumbing.TagObject); err != nil {
+	if err := translateObjectsWithRetry(s, t, plumbing.TagObject); err != nil {
 		return fmt.Errorf("translate tags: %w", err)
 	}
 
@@ -57,7 +57,7 @@ func ImportStoredObjects(src, dst storer.EncodedObjectStorer, t *Translator) err
 		return fmt.Errorf("import commits: %w", err)
 	}
 
-	if err := importObjectsOfType(src, dst, t, plumbing.TagObject); err != nil {
+	if err := importObjectsWithRetry(src, dst, t, plumbing.TagObject); err != nil {
 		return fmt.Errorf("import tags: %w", err)
 	}
 
@@ -88,7 +88,15 @@ func translateObjectsOfType(s storer.EncodedObjectStorer, t *Translator, objType
 // dependencies (e.g. trees referencing other trees, commits referencing
 // other commits). It retries until a full pass adds no new translations.
 func translateObjectsWithRetry(s storer.EncodedObjectStorer, t *Translator, objType plumbing.ObjectType) error {
-	for {
+	maxIterations, err := countObjectsOfType(s, objType)
+	if err != nil {
+		return err
+	}
+
+	for iteration := 0; ; iteration++ {
+		if iteration > maxIterations {
+			return fmt.Errorf("unable to translate %s objects after %d passes", objType, maxIterations)
+		}
 		translated := 0
 		skipped := 0
 
@@ -156,7 +164,16 @@ func importObjectsOfType(src, dst storer.EncodedObjectStorer, t *Translator, obj
 }
 
 func importObjectsWithRetry(src, dst storer.EncodedObjectStorer, t *Translator, objType plumbing.ObjectType) error {
-	for {
+	maxIterations, err := countObjectsOfType(src, objType)
+	if err != nil {
+		return err
+	}
+
+	for iteration := 0; ; iteration++ {
+		if iteration > maxIterations {
+			return fmt.Errorf("unable to import %s objects after %d passes", objType, maxIterations)
+		}
+
 		imported := 0
 		skipped := 0
 
@@ -197,4 +214,23 @@ func importObjectsWithRetry(src, dst storer.EncodedObjectStorer, t *Translator, 
 			return nil
 		}
 	}
+}
+
+func countObjectsOfType(s storer.EncodedObjectStorer, objType plumbing.ObjectType) (int, error) {
+	iter, err := s.IterEncodedObjects(objType)
+	if err != nil {
+		return 0, err
+	}
+	defer iter.Close()
+
+	count := 0
+	err = iter.ForEach(func(plumbing.EncodedObject) error {
+		count++
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	return count, nil
 }

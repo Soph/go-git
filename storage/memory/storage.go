@@ -181,7 +181,7 @@ func (s *Storage) SetEncodedObject(obj plumbing.EncodedObject) (plumbing.Hash, e
 			// Translation failure is non-fatal for now; the object is still
 			// stored. This can happen when dependencies haven't been
 			// translated yet (out-of-order insertion).
-			_ = terr
+			trace.General.Printf("storage/memory: failed to translate compat mapping for %s %s: %v", obj.Type(), h, terr)
 		}
 	}
 
