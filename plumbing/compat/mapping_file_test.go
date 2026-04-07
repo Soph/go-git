@@ -90,6 +90,24 @@ func TestFileMappingAddSyncsAndReusesAppendHandle(t *testing.T) {
 	assert.Equal(t, 2, fs.lastFile.syncCount)
 }
 
+func TestFileMappingCloseClosesAppendHandle(t *testing.T) {
+	base := memfs.New()
+	_ = base.MkdirAll("objects", 0755)
+
+	fs := &trackingOpenFileFS{Filesystem: base}
+	m := NewFileMapping(fs, "objects")
+
+	native := plumbing.NewHash("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	compat := plumbing.NewHash("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	require.NoError(t, m.Add(native, compat))
+
+	require.NotNil(t, fs.lastFile)
+	assert.Equal(t, 0, fs.lastFile.closeCount)
+	require.NoError(t, m.Close())
+	assert.Equal(t, 1, fs.lastFile.closeCount)
+	assert.Nil(t, m.appendFile)
+}
+
 func TestFileMappingPersistenceResolvesLatestMapping(t *testing.T) {
 	fs := memfs.New()
 	_ = fs.MkdirAll("objects", 0755)
@@ -315,6 +333,7 @@ func (fs *trackingOpenFileFS) OpenFile(filename string, flag int, perm os.FileMo
 type syncTrackingFile struct {
 	billy.File
 	syncCount int
+	closeCount int
 }
 
 func (f *syncTrackingFile) Sync() error {
@@ -327,4 +346,9 @@ func (f *syncTrackingFile) Sync() error {
 		return err
 	}
 	return nil
+}
+
+func (f *syncTrackingFile) Close() error {
+	f.closeCount++
+	return f.File.Close()
 }

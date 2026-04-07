@@ -4,6 +4,7 @@ package filesystem
 import (
 	"errors"
 	"fmt"
+	"io"
 	"sync/atomic"
 
 	"github.com/go-git/go-billy/v6"
@@ -260,6 +261,26 @@ func (s *Storage) compatImporting() bool {
 // Filesystem returns the underlying filesystem
 func (s *Storage) Filesystem() billy.Filesystem {
 	return s.fs
+}
+
+// Close releases open descriptors held by the storage, including compat
+// mapping resources when enabled.
+func (s *Storage) Close() error {
+	var firstErr error
+
+	if err := s.ObjectStorage.Close(); err != nil {
+		firstErr = err
+	}
+
+	if s.translator != nil {
+		if closer, ok := s.translator.Mapping().(io.Closer); ok {
+			if err := closer.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+
+	return firstErr
 }
 
 // Init initializes .git directory

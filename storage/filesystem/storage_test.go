@@ -1,6 +1,7 @@
 package filesystem_test
 
 import (
+	"os"
 	"testing"
 
 	"github.com/go-git/go-billy/v6"
@@ -399,6 +400,69 @@ func getExplicitSHA1(t testing.TB) billy.Filesystem {
 	require.NoError(t, err)
 
 	return fs
+}
+
+func TestCloseClosesCompatMapping(t *testing.T) {
+	t.Parallel()
+
+	base := memfs.New()
+	fs := &trackingOpenFileFS{Filesystem: base, failPath: "objects/" + "loose-object-idx"}
+	sto := filesystem.NewStorage(fs, cache.NewObjectLRUDefault())
+	require.NoError(t, sto.Init())
+
+	cfg, err := sto.Config()
+	require.NoError(t, err)
+	cfg.Core.RepositoryFormatVersion = formatcfg.Version1
+	cfg.Extensions.ObjectFormat = formatcfg.SHA256
+	cfg.Extensions.CompatObjectFormat = formatcfg.SHA1
+	require.NoError(t, sto.SetConfig(cfg))
+
+	sto = filesystem.NewStorage(fs, cache.NewObjectLRUDefault())
+	obj := sto.NewEncodedObject()
+	obj.SetType(plumbing.BlobObject)
+	content := []byte("hello compat\n")
+	obj.SetSize(int64(len(content)))
+	w, err := obj.Writer()
+	require.NoError(t, err)
+	_, err = w.Write(content)
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+
+	_, err = sto.SetEncodedObject(obj)
+	require.NoError(t, err)
+
+	require.NotNil(t, fs.lastFile)
+	assert.Equal(t, 0, fs.lastFile.closeCount)
+	require.NoError(t, sto.Close())
+	assert.Equal(t, 1, fs.lastFile.closeCount)
+}
+
+type trackingOpenFileFS struct {
+	billy.Filesystem
+	failPath string
+	lastFile *trackingFile
+}
+
+func (fs *trackingOpenFileFS) OpenFile(filename string, flag int, perm os.FileMode) (billy.File, error) {
+	f, err := fs.Filesystem.OpenFile(filename, flag, perm)
+	if err != nil {
+		return nil, err
+	}
+	if filename == fs.failPath && flag&(os.O_APPEND|os.O_WRONLY) == (os.O_APPEND|os.O_WRONLY) {
+		fs.lastFile = &trackingFile{File: f}
+		return fs.lastFile, nil
+	}
+	return f, nil
+}
+
+type trackingFile struct {
+	billy.File
+	closeCount int
+}
+
+func (f *trackingFile) Close() error {
+	f.closeCount++
+	return f.File.Close()
 }
 
 func TestSetEncodedObjectCompatTranslationFailureIsFatal(t *testing.T) {

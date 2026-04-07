@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"container/list"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -225,6 +226,25 @@ func (m *FileMapping) ensureAppendFile() (billy.File, error) {
 	}
 	m.appendFile = f
 	return f, nil
+}
+
+// Close releases the cached append handle, if one has been opened.
+func (m *FileMapping) Close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.appendFile == nil {
+		return nil
+	}
+
+	closer, ok := m.appendFile.(io.Closer)
+	if !ok {
+		m.appendFile = nil
+		return nil
+	}
+
+	m.appendFile = nil
+	return closer.Close()
 }
 
 func (m *FileMapping) Count() int {
