@@ -428,6 +428,38 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if err := c.validateExtensions(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *Config) validateExtensions() error {
+	compat := c.Extensions.CompatObjectFormat
+	if compat == format.UnsetObjectFormat || compat == "" {
+		return nil
+	}
+
+	switch compat {
+	case format.SHA1, format.SHA256:
+	default:
+		return fmt.Errorf("%w: invalid extensions.compatObjectFormat %q", ErrInvalid, compat)
+	}
+
+	if c.Core.RepositoryFormatVersion != format.Version1 {
+		return fmt.Errorf("%w: extensions.compatObjectFormat requires core.repositoryFormatVersion = 1", ErrInvalid)
+	}
+
+	objectFormat := c.Extensions.ObjectFormat
+	if objectFormat == format.UnsetObjectFormat || objectFormat == "" {
+		return fmt.Errorf("%w: extensions.compatObjectFormat requires extensions.objectFormat", ErrInvalid)
+	}
+
+	if compat == objectFormat {
+		return fmt.Errorf("%w: extensions.compatObjectFormat must differ from extensions.objectFormat", ErrInvalid)
+	}
+
 	return nil
 }
 

@@ -790,6 +790,77 @@ func TestMarshalIndexSkipHash(t *testing.T) {
 	assert.Equal(t, OptBoolTrue, cfg2.Index.SkipHash)
 }
 
+func TestValidateCompatObjectFormat(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		configure   func(*Config)
+		errContains string
+	}{
+		{
+			name: "valid compat object format",
+			configure: func(cfg *Config) {
+				cfg.Core.RepositoryFormatVersion = config.Version1
+				cfg.Extensions.ObjectFormat = config.SHA256
+				cfg.Extensions.CompatObjectFormat = config.SHA1
+			},
+		},
+		{
+			name: "requires version 1",
+			configure: func(cfg *Config) {
+				cfg.Extensions.ObjectFormat = config.SHA256
+				cfg.Extensions.CompatObjectFormat = config.SHA1
+			},
+			errContains: "core.repositoryFormatVersion = 1",
+		},
+		{
+			name: "requires object format",
+			configure: func(cfg *Config) {
+				cfg.Core.RepositoryFormatVersion = config.Version1
+				cfg.Extensions.CompatObjectFormat = config.SHA1
+			},
+			errContains: "requires extensions.objectFormat",
+		},
+		{
+			name: "must differ from object format",
+			configure: func(cfg *Config) {
+				cfg.Core.RepositoryFormatVersion = config.Version1
+				cfg.Extensions.ObjectFormat = config.SHA1
+				cfg.Extensions.CompatObjectFormat = config.SHA1
+			},
+			errContains: "must differ",
+		},
+		{
+			name: "rejects invalid compat format",
+			configure: func(cfg *Config) {
+				cfg.Core.RepositoryFormatVersion = config.Version1
+				cfg.Extensions.ObjectFormat = config.SHA256
+				cfg.Extensions.CompatObjectFormat = config.ObjectFormat("sha512")
+			},
+			errContains: "invalid extensions.compatObjectFormat",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := NewConfig()
+			tc.configure(cfg)
+
+			err := cfg.Validate()
+			if tc.errContains == "" {
+				require.NoError(t, err)
+				return
+			}
+
+			require.ErrorIs(t, err, ErrInvalid)
+			assert.Contains(t, err.Error(), tc.errContains)
+		})
+	}
+}
+
 func TestMerge(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
