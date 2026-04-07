@@ -16,24 +16,54 @@ import (
 // the mapping table for all stored objects.
 func TranslateStoredObjects(s storer.EncodedObjectStorer, t *Translator) error {
 	// Phase 1: Translate blobs (no dependencies).
-	if err := translateObjectsOfType(s, t, plumbing.BlobObject); err != nil {
+	if err := processObjectsOfType(s, plumbing.BlobObject, func(obj plumbing.EncodedObject) (bool, error) {
+		if hasNativeMapping(t, obj.Hash()) {
+			return true, nil
+		}
+		_, err := t.TranslateObject(obj)
+		return false, err
+	}); err != nil {
 		return fmt.Errorf("translate blobs: %w", err)
 	}
 
 	// Phase 2: Translate trees (depend on blobs and other trees).
 	// Trees may reference other trees, so we iterate until no new
 	// translations are made.
-	if err := translateObjectsWithRetry(s, t, plumbing.TreeObject); err != nil {
+	if err := processObjectsWithRetry(s, plumbing.TreeObject,
+		func(obj plumbing.EncodedObject) bool {
+			return hasNativeMapping(t, obj.Hash())
+		},
+		func(obj plumbing.EncodedObject) error {
+			_, err := t.TranslateObject(obj)
+			return err
+		},
+	); err != nil {
 		return fmt.Errorf("translate trees: %w", err)
 	}
 
 	// Phase 3: Translate commits (depend on trees and other commits).
-	if err := translateObjectsWithRetry(s, t, plumbing.CommitObject); err != nil {
+	if err := processObjectsWithRetry(s, plumbing.CommitObject,
+		func(obj plumbing.EncodedObject) bool {
+			return hasNativeMapping(t, obj.Hash())
+		},
+		func(obj plumbing.EncodedObject) error {
+			_, err := t.TranslateObject(obj)
+			return err
+		},
+	); err != nil {
 		return fmt.Errorf("translate commits: %w", err)
 	}
 
 	// Phase 4: Translate tags (depend on any object type).
-	if err := translateObjectsWithRetry(s, t, plumbing.TagObject); err != nil {
+	if err := processObjectsWithRetry(s, plumbing.TagObject,
+		func(obj plumbing.EncodedObject) bool {
+			return hasNativeMapping(t, obj.Hash())
+		},
+		func(obj plumbing.EncodedObject) error {
+			_, err := t.TranslateObject(obj)
+			return err
+		},
+	); err != nil {
 		return fmt.Errorf("translate tags: %w", err)
 	}
 
@@ -45,28 +75,60 @@ func TranslateStoredObjects(s storer.EncodedObjectStorer, t *Translator) error {
 // records the bidirectional mappings. Objects are processed in topological
 // order so internal references can be rewritten safely.
 func ImportStoredObjects(src, dst storer.EncodedObjectStorer, t *Translator) error {
-	if err := importObjectsOfType(src, dst, t, plumbing.BlobObject); err != nil {
+	if err := processObjectsOfType(src, plumbing.BlobObject, func(obj plumbing.EncodedObject) (bool, error) {
+		if hasCompatMapping(t, obj.Hash()) {
+			return true, nil
+		}
+		_, err := t.ImportObject(obj, dst)
+		return false, err
+	}); err != nil {
 		return fmt.Errorf("import blobs: %w", err)
 	}
 
-	if err := importObjectsWithRetry(src, dst, t, plumbing.TreeObject); err != nil {
+	if err := processObjectsWithRetry(src, plumbing.TreeObject,
+		func(obj plumbing.EncodedObject) bool {
+			return hasCompatMapping(t, obj.Hash())
+		},
+		func(obj plumbing.EncodedObject) error {
+			_, err := t.ImportObject(obj, dst)
+			return err
+		},
+	); err != nil {
 		return fmt.Errorf("import trees: %w", err)
 	}
 
-	if err := importObjectsWithRetry(src, dst, t, plumbing.CommitObject); err != nil {
+	if err := processObjectsWithRetry(src, plumbing.CommitObject,
+		func(obj plumbing.EncodedObject) bool {
+			return hasCompatMapping(t, obj.Hash())
+		},
+		func(obj plumbing.EncodedObject) error {
+			_, err := t.ImportObject(obj, dst)
+			return err
+		},
+	); err != nil {
 		return fmt.Errorf("import commits: %w", err)
 	}
 
-	if err := importObjectsWithRetry(src, dst, t, plumbing.TagObject); err != nil {
+	if err := processObjectsWithRetry(src, plumbing.TagObject,
+		func(obj plumbing.EncodedObject) bool {
+			return hasCompatMapping(t, obj.Hash())
+		},
+		func(obj plumbing.EncodedObject) error {
+			_, err := t.ImportObject(obj, dst)
+			return err
+		},
+	); err != nil {
 		return fmt.Errorf("import tags: %w", err)
 	}
 
 	return nil
 }
 
-// translateObjectsOfType translates all objects of the given type that
-// don't already have a compat mapping.
-func translateObjectsOfType(s storer.EncodedObjectStorer, t *Translator, objType plumbing.ObjectType) error {
+func processObjectsOfType(
+	s storer.EncodedObjectStorer,
+	objType plumbing.ObjectType,
+	process func(plumbing.EncodedObject) (skip bool, err error),
+) error {
 	iter, err := s.IterEncodedObjects(objType)
 	if err != nil {
 		return err
@@ -74,20 +136,20 @@ func translateObjectsOfType(s storer.EncodedObjectStorer, t *Translator, objType
 	defer iter.Close()
 
 	return iter.ForEach(func(obj plumbing.EncodedObject) error {
-		// Skip if already translated.
-		if _, err := t.mapping.NativeToCompat(obj.Hash()); err == nil {
+		skip, err := process(obj)
+		if skip {
 			return nil
 		}
-
-		_, err := t.TranslateObject(obj)
 		return err
 	})
 }
 
-// translateObjectsWithRetry translates objects that may have inter-type
-// dependencies (e.g. trees referencing other trees, commits referencing
-// other commits). It retries until a full pass adds no new translations.
-func translateObjectsWithRetry(s storer.EncodedObjectStorer, t *Translator, objType plumbing.ObjectType) error {
+func processObjectsWithRetry(
+	s storer.EncodedObjectStorer,
+	objType plumbing.ObjectType,
+	isProcessed func(plumbing.EncodedObject) bool,
+	process func(plumbing.EncodedObject) error,
+) error {
 	maxIterations, err := countObjectsOfType(s, objType)
 	if err != nil {
 		return err
@@ -106,13 +168,11 @@ func translateObjectsWithRetry(s storer.EncodedObjectStorer, t *Translator, objT
 		}
 
 		err = iter.ForEach(func(obj plumbing.EncodedObject) error {
-			// Skip if already translated.
-			if _, err := t.mapping.NativeToCompat(obj.Hash()); err == nil {
+			if isProcessed(obj) {
 				return nil
 			}
 
-			_, err := t.TranslateObject(obj)
-			if err != nil {
+			if err := process(obj); err != nil {
 				// Dependencies not yet translated; skip for now.
 				skipped++
 				return nil
@@ -146,74 +206,14 @@ func translateObjectsWithRetry(s storer.EncodedObjectStorer, t *Translator, objT
 	}
 }
 
-func importObjectsOfType(src, dst storer.EncodedObjectStorer, t *Translator, objType plumbing.ObjectType) error {
-	iter, err := src.IterEncodedObjects(objType)
-	if err != nil {
-		return err
-	}
-	defer iter.Close()
-
-	return iter.ForEach(func(obj plumbing.EncodedObject) error {
-		if _, err := t.mapping.CompatToNative(obj.Hash()); err == nil {
-			return nil
-		}
-
-		_, err := t.ImportObject(obj, dst)
-		return err
-	})
+func hasNativeMapping(t *Translator, h plumbing.Hash) bool {
+	_, err := t.mapping.NativeToCompat(h)
+	return err == nil
 }
 
-func importObjectsWithRetry(src, dst storer.EncodedObjectStorer, t *Translator, objType plumbing.ObjectType) error {
-	maxIterations, err := countObjectsOfType(src, objType)
-	if err != nil {
-		return err
-	}
-
-	for iteration := 0; ; iteration++ {
-		if iteration > maxIterations {
-			return fmt.Errorf("unable to import %s objects after %d passes", objType, maxIterations)
-		}
-
-		imported := 0
-		skipped := 0
-
-		iter, err := src.IterEncodedObjects(objType)
-		if err != nil {
-			return err
-		}
-
-		err = iter.ForEach(func(obj plumbing.EncodedObject) error {
-			if _, err := t.mapping.CompatToNative(obj.Hash()); err == nil {
-				return nil
-			}
-
-			_, err := t.ImportObject(obj, dst)
-			if err != nil {
-				skipped++
-				return nil
-			}
-
-			imported++
-			return nil
-		})
-		iter.Close()
-
-		if err != nil {
-			return err
-		}
-
-		if imported == 0 && skipped == 0 {
-			return nil
-		}
-
-		if imported == 0 && skipped > 0 {
-			return fmt.Errorf("unable to import %d %s objects: missing dependencies", skipped, objType)
-		}
-
-		if skipped == 0 {
-			return nil
-		}
-	}
+func hasCompatMapping(t *Translator, h plumbing.Hash) bool {
+	_, err := t.mapping.CompatToNative(h)
+	return err == nil
 }
 
 func countObjectsOfType(s storer.EncodedObjectStorer, objType plumbing.ObjectType) (int, error) {
