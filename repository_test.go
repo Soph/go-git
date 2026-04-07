@@ -724,6 +724,99 @@ func TestCloneWithCompatObjectFormatChecksOutWorktree(t *testing.T) {
 	}
 }
 
+func TestFetchWithCompatObjectFormatTags(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		sourceFormat formatcfg.ObjectFormat
+		clientFormat formatcfg.ObjectFormat
+	}{
+		{
+			name:         "sha1 client fetches sha256 tags",
+			sourceFormat: formatcfg.SHA256,
+			clientFormat: formatcfg.SHA1,
+		},
+		{
+			name:         "sha256 client fetches sha1 tags",
+			sourceFormat: formatcfg.SHA1,
+			clientFormat: formatcfg.SHA256,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			source := createTaggedRepositorySource(t, tc.sourceFormat)
+			st := memory.NewStorage(
+				memory.WithObjectFormat(tc.clientFormat),
+				memory.WithCompatObjectFormat(tc.sourceFormat),
+			)
+
+			r, err := Init(st)
+			require.NoError(t, err)
+
+			_, err = r.CreateRemote(&config.RemoteConfig{
+				Name: DefaultRemoteName,
+				URLs: []string{source.path},
+			})
+			require.NoError(t, err)
+
+			err = r.Fetch(&FetchOptions{Tags: AllTags})
+			require.NoError(t, err)
+
+			assertCompatTagState(t, r, source, tc.clientFormat, tc.sourceFormat)
+		})
+	}
+}
+
+func TestCloneWithCompatObjectFormatTags(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		sourceFormat formatcfg.ObjectFormat
+		clientFormat formatcfg.ObjectFormat
+	}{
+		{
+			name:         "sha1 client clones sha256 tags",
+			sourceFormat: formatcfg.SHA256,
+			clientFormat: formatcfg.SHA1,
+		},
+		{
+			name:         "sha256 client clones sha1 tags",
+			sourceFormat: formatcfg.SHA1,
+			clientFormat: formatcfg.SHA256,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			source := createTaggedRepositorySource(t, tc.sourceFormat)
+
+			dir := t.TempDir()
+			st, wt := newCompatFilesystemStorage(t, dir, tc.clientFormat, tc.sourceFormat)
+
+			r, err := Clone(st, wt, &CloneOptions{URL: source.path})
+			require.NoError(t, err)
+
+			assertCompatTagState(t, r, source, tc.clientFormat, tc.sourceFormat)
+
+			reopened, err := PlainOpen(dir)
+			require.NoError(t, err)
+
+			assertCompatTagState(t, reopened, source, tc.clientFormat, tc.sourceFormat)
+			_, err = reopened.Storer.EncodedObject(plumbing.TagObject, source.annotatedTagHash)
+			require.NoError(t, err)
+			_, err = reopened.Storer.EncodedObject(plumbing.TagObject, source.nestedTagHash)
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestPushWithCompatObjectFormat(t *testing.T) {
 	t.Parallel()
 
@@ -860,6 +953,89 @@ func TestCompatPushStorerTranslatesTreeContent(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, compatTreeHash, computed)
 	}
+}
+
+type taggedRepositorySource struct {
+	path             string
+	commitHash       plumbing.Hash
+	annotatedTagHash plumbing.Hash
+	nestedTagHash    plumbing.Hash
+}
+
+func createTaggedRepositorySource(t *testing.T, sourceFormat formatcfg.ObjectFormat) taggedRepositorySource {
+	t.Helper()
+
+	dir := t.TempDir()
+	r, err := PlainInit(dir, false, WithObjectFormat(sourceFormat))
+	require.NoError(t, err)
+
+	commitHash := createCommit(t, r)
+
+	annotatedRef, err := r.CreateTag("annotated-tag", commitHash, &CreateTagOptions{
+		Tagger:  defaultSignature(),
+		Message: "annotated tag message",
+	})
+	require.NoError(t, err)
+
+	nestedRef, err := r.CreateTag("nested-annotated-tag", annotatedRef.Hash(), &CreateTagOptions{
+		Tagger:  defaultSignature(),
+		Message: "nested annotated tag message",
+	})
+	require.NoError(t, err)
+
+	return taggedRepositorySource{
+		path:             dir,
+		commitHash:       commitHash,
+		annotatedTagHash: annotatedRef.Hash(),
+		nestedTagHash:    nestedRef.Hash(),
+	}
+}
+
+func assertCompatTagState(
+	t testing.TB,
+	r *Repository,
+	source taggedRepositorySource,
+	clientFormat, compatFormat formatcfg.ObjectFormat,
+) {
+	t.Helper()
+
+	annotatedRef, err := r.Tag("annotated-tag")
+	require.NoError(t, err)
+	assert.Equal(t, clientFormat.HexSize(), len(annotatedRef.Hash().String()))
+
+	annotatedObj, err := r.TagObject(annotatedRef.Hash())
+	require.NoError(t, err)
+	assert.Equal(t, plumbing.CommitObject, annotatedObj.TargetType)
+	assert.Equal(t, clientFormat.HexSize(), len(annotatedObj.Target.String()))
+
+	nestedRef, err := r.Tag("nested-annotated-tag")
+	require.NoError(t, err)
+	assert.Equal(t, clientFormat.HexSize(), len(nestedRef.Hash().String()))
+
+	nestedObj, err := r.TagObject(nestedRef.Hash())
+	require.NoError(t, err)
+	assert.Equal(t, plumbing.TagObject, nestedObj.TargetType)
+	assert.Equal(t, annotatedRef.Hash(), nestedObj.Target)
+
+	tr := requireCompatTranslator(t, r.Storer)
+	annotatedCompatHash, err := tr.Mapping().NativeToCompat(annotatedRef.Hash())
+	require.NoError(t, err)
+	assert.Equal(t, source.annotatedTagHash, annotatedCompatHash)
+	assert.Equal(t, compatFormat.HexSize(), len(annotatedCompatHash.String()))
+
+	nestedCompatHash, err := tr.Mapping().NativeToCompat(nestedRef.Hash())
+	require.NoError(t, err)
+	assert.Equal(t, source.nestedTagHash, nestedCompatHash)
+	assert.Equal(t, compatFormat.HexSize(), len(nestedCompatHash.String()))
+
+	commitCompatHash, err := tr.Mapping().NativeToCompat(annotatedObj.Target)
+	require.NoError(t, err)
+	assert.Equal(t, source.commitHash, commitCompatHash)
+
+	_, err = r.Storer.EncodedObject(plumbing.TagObject, source.annotatedTagHash)
+	require.NoError(t, err)
+	_, err = r.Storer.EncodedObject(plumbing.TagObject, source.nestedTagHash)
+	require.NoError(t, err)
 }
 
 func requireCompatTranslator(t testing.TB, s storage.Storer) *compat.Translator {
