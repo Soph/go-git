@@ -1,8 +1,12 @@
 package transport
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/compat"
+	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -27,4 +31,16 @@ func (s *ReceivePackSuite) TestReceivePackAdvertiseV2() {
 func (s *ReceivePackSuite) TestReceivePackAdvertiseV1() {
 	buf := testAdvertise(s.T(), ReceivePack, "version=1", false)
 	s.Containsf(buf.String(), "version 1", "advertisement should contain version 1")
+}
+
+func (s *ReceivePackSuite) TestNormalizeReceivePackHashZeroSHA256() {
+	zero := plumbing.NewHash(strings.Repeat("0", formatcfg.SHA256.HexSize()))
+	tr := compat.NewTranslator(compat.Formats{
+		Native: formatcfg.SHA1,
+		Compat: formatcfg.SHA256,
+	}, compat.NewMemoryMapping())
+
+	h := normalizeReceivePackHash(tr, zero)
+	s.True(h.IsZero())
+	s.Equal(zero.String(), h.String())
 }

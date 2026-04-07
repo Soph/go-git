@@ -235,7 +235,7 @@ func storageObjectFormat(st storage.Storer) formatcfg.ObjectFormat {
 }
 
 func normalizeReceivePackHash(t *compat.Translator, h plumbing.Hash) plumbing.Hash {
-	if h == plumbing.ZeroHash {
+	if h.IsZero() {
 		return h
 	}
 

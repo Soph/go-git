@@ -22,6 +22,8 @@ import (
 	"github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/cache"
+	"github.com/go-git/go-git/v6/plumbing/compat"
+	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v6/plumbing/protocol/packp/capability"
@@ -671,6 +673,19 @@ func eventually(s *RemoteSuite, condition func() bool) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+func (s *RemoteSuite) TestCompatHashForPushZeroSHA256() {
+	zero := plumbing.NewHash(strings.Repeat("0", formatcfg.SHA256.HexSize()))
+	tr := compat.NewTranslator(compat.Formats{
+		Native: formatcfg.SHA256,
+		Compat: formatcfg.SHA1,
+	}, compat.NewMemoryMapping())
+
+	h, err := compatHashForPush(zero, tr)
+	s.NoError(err)
+	s.True(h.IsZero())
+	s.Equal(zero.String(), h.String())
 }
 
 func (s *RemoteSuite) TestPushContextCanceled() {

@@ -1061,7 +1061,7 @@ func objectExists(s storer.EncodedObjectStorer, h plumbing.Hash) (bool, error) {
 }
 
 func checkFastForwardUpdate(s storer.EncodedObjectStorer, remoteRefs storer.ReferenceStorer, cmd *packp.Command) error {
-	if cmd.Old == plumbing.ZeroHash {
+	if cmd.Old.IsZero() {
 		_, err := remoteRefs.Reference(cmd.Name)
 		if errors.Is(err, plumbing.ErrReferenceNotFound) {
 			return nil
@@ -1367,7 +1367,7 @@ func (r *Remote) list(ctx context.Context, o *ListOptions) (rfs []*plumbing.Refe
 func objectsToPush(commands []*packp.Command) []plumbing.Hash {
 	objects := make([]plumbing.Hash, 0, len(commands))
 	for _, cmd := range commands {
-		if cmd.New == plumbing.ZeroHash {
+		if cmd.New.IsZero() {
 			continue
 		}
 		objects = append(objects, cmd.New)
@@ -1571,7 +1571,7 @@ func translatePushHashes(hs []plumbing.Hash, t *compat.Translator) ([]plumbing.H
 }
 
 func compatHashForPush(h plumbing.Hash, t *compat.Translator) (plumbing.Hash, error) {
-	if h == plumbing.ZeroHash {
+	if h.IsZero() {
 		return h, nil
 	}
 	compatHash, err := t.Mapping().NativeToCompat(h)
