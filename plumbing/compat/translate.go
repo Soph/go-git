@@ -225,7 +225,7 @@ func (t *Translator) translateTree(content []byte) ([]byte, error) {
 
 // translateCommit rewrites hex hashes on "tree" and "parent" lines.
 func (t *Translator) translateCommit(content []byte) ([]byte, error) {
-	return t.translateTextObject(content, []string{"tree", "parent"})
+	return t.translateCommitTextObject(content, false)
 }
 
 // translateTag rewrites the hex hash on the "object" line.
@@ -236,7 +236,7 @@ func (t *Translator) translateTag(content []byte) ([]byte, error) {
 // reverseTranslateCommit rewrites compat-format hex hashes on "tree" and
 // "parent" lines back to native-format hashes.
 func (t *Translator) reverseTranslateCommit(content []byte) ([]byte, error) {
-	return t.reverseTranslateTextObject(content, []string{"tree", "parent"})
+	return t.translateCommitTextObject(content, true)
 }
 
 // reverseTranslateTag rewrites the compat-format hex hash on the "object" line
@@ -411,6 +411,137 @@ func (t *Translator) reverseTranslateTextObject(content []byte, hashFields []str
 	}
 
 	return out.Bytes(), nil
+}
+
+func (t *Translator) translateCommitTextObject(content []byte, reverse bool) ([]byte, error) {
+	var out bytes.Buffer
+	remaining := content
+	headerDone := false
+	var pending *lineInfo
+
+	for pending != nil || len(remaining) > 0 {
+		li := pending
+		if li != nil {
+			pending = nil
+		} else {
+			next := nextLineInfo(remaining)
+			li = &next
+			remaining = next.rest
+		}
+
+		line := li.line
+
+		if !headerDone {
+			if len(line) == 0 {
+				headerDone = true
+				if li.hasNewline {
+					out.WriteByte('\n')
+				}
+				continue
+			}
+
+			if bytes.HasPrefix(line, []byte("mergetag ")) {
+				nextPending, err := t.translateMergeTagSection(&out, line, remaining, reverse)
+				if err != nil {
+					return nil, err
+				}
+				if nextPending != nil {
+					remaining = nextPending.rest
+					pending = nextPending
+				} else {
+					remaining = nil
+				}
+				continue
+			}
+
+			fields := []string{"tree", "parent"}
+			var translated []byte
+			var err error
+			if reverse {
+				translated, err = t.reverseTranslateTextObject(append(line, '\n'), fields)
+			} else {
+				translated, err = t.translateTextObject(append(line, '\n'), fields)
+			}
+			if err != nil {
+				return nil, err
+			}
+			out.Write(translated)
+			if !li.hasNewline && len(translated) > 0 && translated[len(translated)-1] == '\n' {
+				out.Truncate(out.Len() - 1)
+			}
+			continue
+		}
+
+		out.Write(line)
+		if li.hasNewline {
+			out.WriteByte('\n')
+		}
+	}
+
+	return out.Bytes(), nil
+}
+
+type lineInfo struct {
+	line       []byte
+	rest       []byte
+	hasNewline bool
+}
+
+func nextLineInfo(content []byte) lineInfo {
+	nlIdx := bytes.IndexByte(content, '\n')
+	if nlIdx >= 0 {
+		return lineInfo{
+			line:       content[:nlIdx],
+			rest:       content[nlIdx+1:],
+			hasNewline: true,
+		}
+	}
+
+	return lineInfo{
+		line: content,
+	}
+}
+
+func (t *Translator) translateMergeTagSection(out *bytes.Buffer, firstLine, remaining []byte, reverse bool) (*lineInfo, error) {
+	payloadLines := [][]byte{firstLine[len("mergetag "):]}
+	var nextPending *lineInfo
+
+	for len(remaining) > 0 {
+		next := nextLineInfo(remaining)
+		remaining = next.rest
+		if len(next.line) > 0 && next.line[0] == ' ' {
+			payloadLines = append(payloadLines, next.line[1:])
+			continue
+		}
+		nextPending = &next
+		break
+	}
+
+	payload := bytes.Join(payloadLines, []byte("\n"))
+	var translated []byte
+	var err error
+	if reverse {
+		translated, err = t.reverseTranslateTag(payload)
+	} else {
+		translated, err = t.translateTag(payload)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("translate mergetag: %w", err)
+	}
+
+	lines := bytes.Split(translated, []byte("\n"))
+	out.WriteString("mergetag ")
+	out.Write(lines[0])
+	for _, line := range lines[1:] {
+		out.WriteByte('\n')
+		out.WriteByte(' ')
+		out.Write(line)
+	}
+	if nextPending != nil || len(remaining) > 0 {
+		out.WriteByte('\n')
+	}
+
+	return nextPending, nil
 }
 
 // ReverseTranslateContent takes object content in native format and returns

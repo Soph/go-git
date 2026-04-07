@@ -159,6 +159,71 @@ func TestTranslateCommitWithParents(t *testing.T) {
 	assert.False(t, compatHash.IsZero())
 }
 
+func TestTranslateCommitWithMergeTag(t *testing.T) {
+	tr, _ := newTestTranslator()
+
+	blobObj := makeEncodedObject(t, plumbing.BlobObject, []byte("data"), format.SHA1)
+	_, err := tr.TranslateObject(blobObj)
+	require.NoError(t, err)
+
+	var treeContent []byte
+	treeContent = append(treeContent, []byte("100644 f.txt")...)
+	treeContent = append(treeContent, 0x00)
+	treeContent = append(treeContent, blobObj.Hash().Bytes()...)
+	treeObj := makeEncodedObject(t, plumbing.TreeObject, treeContent, format.SHA1)
+	_, err = tr.TranslateObject(treeObj)
+	require.NoError(t, err)
+
+	rootText := "tree " + treeObj.Hash().String() + "\n" +
+		"author A <a@b.c> 100 +0000\n" +
+		"committer A <a@b.c> 100 +0000\n" +
+		"\n" +
+		"root\n"
+	rootObj := makeEncodedObject(t, plumbing.CommitObject, []byte(rootText), format.SHA1)
+	_, err = tr.TranslateObject(rootObj)
+	require.NoError(t, err)
+
+	rootCompat, err := tr.Mapping().NativeToCompat(rootObj.Hash())
+	require.NoError(t, err)
+
+	mergeTag := "object " + rootObj.Hash().String() + "\n" +
+		"type commit\n" +
+		"tag merged\n" +
+		"tagger A <a@b.c> 150 +0000\n" +
+		"\n" +
+		"merge tag message\n"
+	commitText := "tree " + treeObj.Hash().String() + "\n" +
+		"parent " + rootObj.Hash().String() + "\n" +
+		"author A <a@b.c> 200 +0000\n" +
+		"committer A <a@b.c> 200 +0000\n" +
+		"mergetag object " + rootObj.Hash().String() + "\n" +
+		" type commit\n" +
+		" tag merged\n" +
+		" tagger A <a@b.c> 150 +0000\n" +
+		" \n" +
+		" merge tag message\n" +
+		"\n" +
+		"child\n"
+	commitObj := makeEncodedObject(t, plumbing.CommitObject, []byte(commitText), format.SHA1)
+
+	compatHash, err := tr.TranslateObject(commitObj)
+	require.NoError(t, err)
+	assert.False(t, compatHash.IsZero())
+
+	translatedContent, err := tr.ReverseTranslateContent(plumbing.CommitObject, []byte(commitText))
+	require.NoError(t, err)
+	assert.Contains(t, string(translatedContent), "mergetag object "+rootCompat.String())
+	assert.Contains(t, string(translatedContent), "parent "+rootCompat.String())
+
+	roundTrip, err := tr.reverseTranslateCommit(translatedContent)
+	require.NoError(t, err)
+	assert.Equal(t, commitText, string(roundTrip))
+
+	translatedMergeTag, err := tr.translateTag([]byte(mergeTag))
+	require.NoError(t, err)
+	assert.Contains(t, string(translatedMergeTag), "object "+rootCompat.String())
+}
+
 func TestTranslateTag(t *testing.T) {
 	tr, m := newTestTranslator()
 
