@@ -400,19 +400,13 @@ func (t *Translator) rewriteCommitTextObject(content []byte, reverse bool) ([]by
 			}
 
 			fields := []string{"tree", "parent"}
-			var translated []byte
-			var err error
-			if reverse {
-				translated, err = t.rewriteTextObject(append(line, '\n'), fields, true)
-			} else {
-				translated, err = t.rewriteTextObject(append(line, '\n'), fields, false)
-			}
+			translated, err := t.rewriteHeaderHashLine(line, fields, reverse)
 			if err != nil {
 				return nil, err
 			}
 			out.Write(translated)
-			if !li.hasNewline && len(translated) > 0 && translated[len(translated)-1] == '\n' {
-				out.Truncate(out.Len() - 1)
+			if li.hasNewline {
+				out.WriteByte('\n')
 			}
 			continue
 		}
@@ -424,6 +418,36 @@ func (t *Translator) rewriteCommitTextObject(content []byte, reverse bool) ([]by
 	}
 
 	return out.Bytes(), nil
+}
+
+func (t *Translator) rewriteHeaderHashLine(line []byte, hashFields []string, reverse bool) ([]byte, error) {
+	fromHexSize := t.formats.Native.HexSize()
+	lookup := t.mapping.NativeToCompat
+	missingFormat := "compat"
+	if reverse {
+		fromHexSize = t.formats.Compat.HexSize()
+		lookup = t.mapping.CompatToNative
+		missingFormat = "native"
+	}
+
+	for _, field := range hashFields {
+		prefix := field + " "
+		if bytes.HasPrefix(line, []byte(prefix)) && len(line) == len(prefix)+fromHexSize {
+			fromHash, ok := plumbing.FromHex(string(line[len(prefix):]))
+			if !ok {
+				return nil, fmt.Errorf("invalid hash on %s line: %q", field, string(line[len(prefix):]))
+			}
+
+			toHash, err := lookup(fromHash)
+			if err != nil {
+				return nil, fmt.Errorf("%s hash %s: no %s mapping: %w", field, fromHash, missingFormat, errors.Join(ErrMissingDependencyMapping, err))
+			}
+
+			return []byte(prefix + toHash.String()), nil
+		}
+	}
+
+	return line, nil
 }
 
 type lineInfo struct {
