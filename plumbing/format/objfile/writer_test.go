@@ -2,6 +2,7 @@ package objfile
 
 import (
 	"bytes"
+	"crypto"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -85,4 +86,24 @@ func (s *SuiteWriter) TestNewWriterInvalidSize() {
 	s.ErrorIs(err, ErrNegativeSize)
 	err = w.WriteHeader(plumbing.BlobObject, -1651860)
 	s.ErrorIs(err, ErrNegativeSize)
+}
+
+func (s *SuiteWriter) TestWriteObjfileSHA256() {
+	buffer := bytes.NewBuffer(nil)
+	content := []byte("this is a test")
+	size := int64(len(content))
+	w := NewWriterWithFormat(buffer, "sha256")
+
+	err := w.WriteHeader(plumbing.BlobObject, size)
+	s.NoError(err)
+
+	written, err := io.Copy(w, bytes.NewReader(content))
+	s.NoError(err)
+	s.Equal(size, written)
+
+	want, err := plumbing.FromObjectFormat("sha256").Compute(plumbing.BlobObject, content)
+	s.NoError(err)
+	s.Equal(crypto.SHA256.Size(), w.Hash().Size())
+	s.Equal(want, w.Hash())
+	s.NoError(w.Close())
 }

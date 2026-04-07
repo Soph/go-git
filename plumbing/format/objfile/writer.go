@@ -22,6 +22,7 @@ type Writer struct {
 	hasher plumbing.Hasher
 	multi  io.Writer
 	zlib   *zlib.Writer
+	format format.ObjectFormat
 
 	closed  bool
 	pending int64 // number of unwritten bytes
@@ -34,10 +35,21 @@ type Writer struct {
 // The returned Writer implements io.WriteCloser. Close should be called when
 // finished with the Writer. Close will not close the underlying io.Writer.
 func NewWriter(w io.Writer) *Writer {
+	return NewWriterWithFormat(w, format.SHA1)
+}
+
+// NewWriterWithFormat returns a new Writer using the given object format when
+// computing the object hash.
+func NewWriterWithFormat(w io.Writer, of format.ObjectFormat) *Writer {
+	if of == format.UnsetObjectFormat {
+		of = format.SHA1
+	}
+
 	zlib := sync.GetZlibWriter(w)
 	return &Writer{
-		raw:  w,
-		zlib: zlib,
+		raw:    w,
+		zlib:   zlib,
+		format: of,
 	}
 }
 
@@ -66,7 +78,7 @@ func (w *Writer) WriteHeader(t plumbing.ObjectType, size int64) error {
 func (w *Writer) prepareForWrite(t plumbing.ObjectType, size int64) {
 	w.pending = size
 
-	w.hasher = plumbing.NewHasher(format.SHA1, t, size)
+	w.hasher = plumbing.NewHasher(w.format, t, size)
 	w.multi = io.MultiWriter(w.zlib, w.hasher)
 }
 

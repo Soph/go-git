@@ -338,14 +338,14 @@ type ObjectWriter struct {
 	f  billy.File
 }
 
-func newObjectWriter(fs billy.Filesystem) (*ObjectWriter, error) {
+func newObjectWriter(fs billy.Filesystem, format formatcfg.ObjectFormat) (*ObjectWriter, error) {
 	f, err := fs.TempFile(fs.Join(objectsPath, packPath), "tmp_obj_")
 	if err != nil {
 		return nil, err
 	}
 
 	return &ObjectWriter{
-		Writer: (*objfile.NewWriter(f)),
+		Writer: (*objfile.NewWriterWithFormat(f, format)),
 		fs:     fs,
 		f:      f,
 	}, nil

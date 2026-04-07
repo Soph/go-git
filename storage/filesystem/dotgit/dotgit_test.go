@@ -2,6 +2,7 @@ package dotgit
 
 import (
 	"bufio"
+	"crypto"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/go-git/go-git/v6/plumbing"
+	formatcfg "github.com/go-git/go-git/v6/plumbing/format/config"
 	"github.com/go-git/go-git/v6/plumbing/format/idxfile"
 	"github.com/go-git/go-git/v6/storage"
 )
@@ -794,6 +796,29 @@ func (s *SuiteDotGit) TestNewObject() {
 	s.Require().NoError(err)
 
 	i, err := fs.Stat("objects/a8/a940627d132695a9769df883f85992f0ff4a43")
+	s.Require().NoError(err)
+	s.Equal(int64(34), i.Size())
+}
+
+func (s *SuiteDotGit) TestNewObjectSHA256() {
+	fs := s.EmptyFS()
+
+	dir := NewWithOptions(fs, Options{ObjectFormat: formatcfg.SHA256})
+	w, err := dir.NewObject()
+	s.Require().NoError(err)
+
+	err = w.WriteHeader(plumbing.BlobObject, 14)
+	s.Require().NoError(err)
+	n, err := w.Write([]byte("this is a test"))
+	s.Require().NoError(err)
+	s.Equal(14, n)
+
+	s.Equal(crypto.SHA256.Size(), w.Hash().Size())
+
+	err = w.Close()
+	s.Require().NoError(err)
+
+	i, err := fs.Stat(dir.objectPath(w.Hash()))
 	s.Require().NoError(err)
 	s.Equal(int64(34), i.Size())
 }
