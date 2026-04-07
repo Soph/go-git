@@ -77,7 +77,6 @@ func (s *pushStorer) Config() (*config.Config, error) {
 	}
 
 	cloned := *cfg
-	cloned.Extensions = cfg.Extensions
 	cloned.Extensions.ObjectFormat = s.translator.CompatObjectFormat()
 	return &cloned, nil
 }
