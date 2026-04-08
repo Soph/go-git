@@ -170,6 +170,7 @@ func TestMappingCachePromotesRecentAccess(t *testing.T) {
 	got, ok := c.get(key1)
 	require.True(t, ok)
 	assert.True(t, got.Equal(val1))
+	c.touch(key1)
 
 	c.add(key3, val3)
 

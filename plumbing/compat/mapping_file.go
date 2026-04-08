@@ -66,6 +66,7 @@ func (m *FileMapping) NativeToCompat(native plumbing.Hash) (plumbing.Hash, error
 	m.mu.RLock()
 	if h, ok := m.nativeToCompat.get(native); ok {
 		m.mu.RUnlock()
+		m.promoteNativeToCompat(native, h)
 		return h, nil
 	}
 	m.mu.RUnlock()
@@ -91,6 +92,7 @@ func (m *FileMapping) CompatToNative(compat plumbing.Hash) (plumbing.Hash, error
 	m.mu.RLock()
 	if h, ok := m.compatToNative.get(compat); ok {
 		m.mu.RUnlock()
+		m.promoteCompatToNative(compat, h)
 		return h, nil
 	}
 	m.mu.RUnlock()
@@ -283,6 +285,26 @@ func (m *FileMapping) Count() int {
 	return len(nativeToCompat)
 }
 
+func (m *FileMapping) promoteNativeToCompat(native, compat plumbing.Hash) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if cached, ok := m.nativeToCompat.get(native); ok && cached.Equal(compat) {
+		m.nativeToCompat.touch(native)
+		m.compatToNative.touch(compat)
+	}
+}
+
+func (m *FileMapping) promoteCompatToNative(compat, native plumbing.Hash) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if cached, ok := m.compatToNative.get(compat); ok && cached.Equal(native) {
+		m.compatToNative.touch(compat)
+		m.nativeToCompat.touch(native)
+	}
+}
+
 func parseMappingLine(line string) (plumbing.Hash, plumbing.Hash, bool) {
 	fields := strings.Fields(line)
 	if len(fields) != 2 {
@@ -322,8 +344,15 @@ func (c *mappingCache) get(key plumbing.Hash) (plumbing.Hash, bool) {
 	if !ok {
 		return plumbing.Hash{}, false
 	}
-	c.order.MoveToBack(elem)
 	return elem.Value.(*mappingCacheEntry).value, true
+}
+
+func (c *mappingCache) touch(key plumbing.Hash) {
+	elem, ok := c.entries[key]
+	if !ok {
+		return
+	}
+	c.order.MoveToBack(elem)
 }
 
 func (c *mappingCache) add(key, value plumbing.Hash) {
